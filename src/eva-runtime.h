@@ -355,6 +355,21 @@ public:
     // Max total shared memory one workgroup may declare, in bytes
     // (VkPhysicalDeviceLimits.maxComputeSharedMemorySize).
     uint32_t maxComputeSharedMemorySize() const;
+
+    // ---- device memory ----
+    // Buffer memory is suballocated from slabs rather than one vkAllocateMemory per buffer.
+    // These expose what that allocator did, which is otherwise invisible: in particular it
+    // DEMOTES rather than failing, so a device-local request can silently land in host
+    // memory and the only way to notice is the requested-vs-actual columns of the trace.
+    //
+    // Tracing costs a driver round trip per event, so it is off by default and meant to be
+    // switched on around the run you care about.
+    void     setMemoryTracing(bool on);
+    void     writeMemoryTrace(std::FILE* out) const;   // tab-separated, one event per line
+    void     clearMemoryTrace();
+    // Bytes committed to the driver, bytes actually handed out, and how many slabs that took.
+    // reserved/live is the fragmentation ratio.
+    void     memoryUsage(uint64_t* reserved, uint64_t* live, uint32_t* slabs) const;
     // Alignment a storage-buffer descriptor's offset must be a multiple of, in
     // bytes (VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment).
     uint32_t minStorageBufferOffsetAlignment() const;

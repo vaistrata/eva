@@ -13,6 +13,7 @@
 #include <iostream> // std::cin (device selection)
 #include "eva-native-factory.h"
 #include "eva-runtime.h"
+#include "eva-memory.h"
 
 // #define USE_DEBUG_PRINTF 1
 
@@ -305,6 +306,12 @@ struct Device::Impl {
     std::set<ShaderModule::Impl**> shaderModules;
     std::set<ComputePipeline::Impl**> computePipelines;
 
+    // Buffer memory now comes from here instead of one vkAllocateMemory per buffer. The
+    // allocator has to outlive every buffer that holds a Suballocation from it and die before
+    // vkDestroyDevice, so ~Impl resets it between the buffer deleters and the device teardown.
+    MemoryTopology                   memTopo;
+    std::unique_ptr<DeviceAllocator> memAlloc;
+
     std::set<Buffer::Impl**> buffers;
     std::set<Image::Impl**> images;
     std::set<Sampler::Impl**> samplers;
@@ -548,6 +555,12 @@ struct Buffer::Impl {
     uint64_t mappedSize = 0;    // used for debug
     DeviceAddress deviceAddress = 0;
 
+    // Set when the memory is a suballocation rather than a dedicated allocation. vkMemory is
+    // then the SLAB's memory, shared with other buffers, and sub.offset is where this buffer
+    // starts inside it - so every use of vkMemory has to carry that offset.
+    DeviceAllocator*               owner = nullptr;
+    DeviceAllocator::Suballocation sub{};
+
     Impl(VkDevice vkDevice, 
         VkBuffer vkBuffer, 
         VkDeviceMemory vkMemory, 
@@ -562,10 +575,19 @@ struct Buffer::Impl {
     , usage(usage)
     , reqMemProps(reqMemProps)
     , memProps(memProps) {}
-    ~Impl() {         
-        if (mapped) vkUnmapMemory(vkDevice, vkMemory);
-        vkDestroyBuffer(vkDevice, vkBuffer, nullptr); 
-        vkFreeMemory(vkDevice, vkMemory, nullptr); 
+    ~Impl() {
+        vkDestroyBuffer(vkDevice, vkBuffer, nullptr);
+        if (owner)
+        {
+            // The slab owns the mapping and the memory. Unmapping here would tear the
+            // mapping out from under every other buffer cut from the same slab.
+            owner->free(sub);
+        }
+        else
+        {
+            if (mapped) vkUnmapMemory(vkDevice, vkMemory);
+            vkFreeMemory(vkDevice, vkMemory, nullptr);
+        }
     }
 
     VkMappedMemoryRange getRange(uint64_t offset, uint64_t size) const;
@@ -1614,6 +1636,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     pImpl->enabledExtensions = std::move(reqExtentions);
     pImpl->features = enabledFeatures;
 
+    // 확장 목록은 vkCreateDevice 에 실제로 넘긴 것이어야 한다. 켜지지 않은 확장의 구조체를
+    // 질의하면 값이 정의되지 않으므로 MemoryTopology 의 선택적 질의가 전부 이 목록에 걸려
+    // 있다.
+    pImpl->memTopo = MemoryTopology(pd, pImpl->enabledExtensions);
+    {
+        DeviceAllocator::Config mc{};
+        mc.traceEvents = false;   // setMemoryTracing() 으로 켠다
+        pImpl->memAlloc = std::make_unique<DeviceAllocator>(vkDevice, pImpl->memTopo, mc);
+    }
+
     if (!pImpl->features.synchronization2)
     {
         throw std::runtime_error("The selected physical device does not support synchronization2 feature, which is required by the runtime.");
@@ -1858,7 +1890,36 @@ Device::Impl::~Impl()
     deleter(accelerationStructures);
 #endif
 
+    // 순서가 중요하다. 위의 deleter(buffers) 가 Suballocation 을 할당기로 돌려주므로
+    // 할당기는 그때까지 살아 있어야 하고, 슬랩을 vkFreeMemory 하려면 device 보다는 먼저
+    // 죽어야 한다. 사이가 유일하게 맞는 자리다.
+    memAlloc.reset();
+
     vkDestroyDevice(vkDevice, nullptr);
+}
+
+void Device::setMemoryTracing(bool on)
+{
+    if (impl().memAlloc) impl().memAlloc->setTracing(on);
+}
+
+void Device::writeMemoryTrace(std::FILE* out) const
+{
+    if (impl().memAlloc) impl().memAlloc->writeTrace(out);
+}
+
+void Device::clearMemoryTrace()
+{
+    if (impl().memAlloc) impl().memAlloc->clearEvents();
+}
+
+void Device::memoryUsage(uint64_t* reserved, uint64_t* live, uint32_t* slabs) const
+{
+    DeviceAllocator::Stats st{};
+    if (impl().memAlloc) st = impl().memAlloc->statsTotal();
+    if (reserved) *reserved = st.reserved;
+    if (live)     *live     = st.live;
+    if (slabs)    *slabs    = st.slabs;
 }
 
 void Device::reportGPUQueueFamilies() const
@@ -3799,21 +3860,62 @@ Buffer Device::createBuffer(const BufferCreateInfo& info)
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,  // TODO: support VK_SHARING_MODE_CONCURRENT
     });
 
-    auto memInfo = getMemoryAllocInfo(
-        impl().vkPhysicalDevice, impl().vkDevice, vkHandle, (VkMemoryPropertyFlags)(uint32_t)info.reqMemProps);
+    VkMemoryRequirements memReq{};
+    vkGetBufferMemoryRequirements(impl().vkDevice, vkHandle, &memReq);
 
-    static VkMemoryAllocateFlagsInfo flagsInfo{
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
-        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
-    };
+    // 요청한 속성에서 티어를 고르고, 안 되면 한 단계 내려간다. 여기서 실패가 아니라 강등이
+    // 일어난다 - 호출자는 memProps 로 실제로 어디에 앉았는지 볼 수 있다.
+    const VkMemoryPropertyFlags want = (VkMemoryPropertyFlags)(uint32_t)info.reqMemProps;
+    MemoryTier preferred = MemoryTier::HostPinned;
+    MemoryTier fallback  = MemoryTier::HostPinned;
+    if (want & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    {
+        preferred = (want & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? MemoryTier::DeviceHost
+                                                                 : MemoryTier::Device;
+        fallback  = (want & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? MemoryTier::HostPinned
+                                                                 : MemoryTier::HostPinned;
+    }
+    else if (want & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+    {
+        preferred = MemoryTier::HostCached;
+        fallback  = MemoryTier::HostPinned;
+    }
 
-    if ((uint32_t)info.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
-        memInfo.first.pNext = &flagsInfo;
+    // 디바이스 주소를 쓰는 버퍼는 슬랩 자체가 그 플래그로 만들어져야 하는데, 슬랩은 여러
+    // 버퍼가 나눠 쓰므로 지금은 전용 할당으로 남긴다. 나머지 전부가 슬랩을 탄다.
+    const bool wantsDeviceAddress =
+        ((uint32_t)info.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
 
-    VkDeviceMemory memory = allocate<VkDeviceMemory>(impl().vkDevice, memInfo.first);
-    ASSERT_SUCCESS(vkBindBufferMemory(impl().vkDevice, vkHandle, memory, 0));
+    DeviceAllocator*               owner = nullptr;
+    DeviceAllocator::Suballocation sub{};
+    VkDeviceMemory                 memory = VK_NULL_HANDLE;
+    MEMORY_PROPERTY                actualProps{};
 
-    
+    if (!wantsDeviceAddress && impl().memAlloc &&
+        impl().memAlloc->allocate(memReq, preferred, fallback, &sub) == VK_SUCCESS)
+    {
+        owner       = impl().memAlloc.get();
+        memory      = sub.memory;
+        actualProps = (MEMORY_PROPERTY)(uint32_t)impl().memTopo.propertiesOf(sub.memoryTypeIndex);
+        ASSERT_SUCCESS(vkBindBufferMemory(impl().vkDevice, vkHandle, memory, sub.offset));
+    }
+    else
+    {
+        auto memInfo = getMemoryAllocInfo(
+            impl().vkPhysicalDevice, impl().vkDevice, vkHandle, want);
+
+        static VkMemoryAllocateFlagsInfo flagsInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+            .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
+        };
+        if (wantsDeviceAddress)
+            memInfo.first.pNext = &flagsInfo;
+
+        memory = allocate<VkDeviceMemory>(impl().vkDevice, memInfo.first);
+        ASSERT_SUCCESS(vkBindBufferMemory(impl().vkDevice, vkHandle, memory, 0));
+        actualProps = (MEMORY_PROPERTY)(uint32_t)memInfo.second;
+    }
+
     auto pImpl = new Buffer::Impl(
         impl().vkDevice,
         vkHandle,
@@ -3821,7 +3923,9 @@ Buffer Device::createBuffer(const BufferCreateInfo& info)
         info.size,
         info.usage,
         info.reqMemProps,
-        (MEMORY_PROPERTY)(uint32_t)memInfo.second);
+        actualProps);
+    pImpl->owner = owner;
+    pImpl->sub   = sub;
 
     if ((uint32_t)info.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
     {
@@ -3845,6 +3949,20 @@ uint8_t* Buffer::map(uint64_t offset, uint64_t size)
         size = impl().size - offset;
     else
         EVA_ASSERT(offset + size <= impl().size);  // VUID-vkMapMemory-size-00681
+
+    if (impl().owner)
+    {
+        // 슬랩은 만들 때 통째로 한 번 매핑된다. 여기서 vkMapMemory 를 다시 부르면 이미
+        // 매핑된 메모리를 또 매핑하는 것이라 잘못된 사용이다.
+        //
+        // sub.mapped 는 **이미 슬랩 베이스 + sub.offset** 이다. 여기에 sub.offset 을 또
+        // 더하는 것이 M-2 였고, 오프셋이 0 인 첫 버퍼에서는 증상이 없다가 두 번째 버퍼부터
+        // 조용히 남의 바이트를 가리켰다.
+        impl().mapped       = impl().sub.mapped + offset;
+        impl().mappedOffset = offset;
+        impl().mappedSize   = size;
+        return impl().mapped;
+    }
 
     if (impl().mapped)
     {
