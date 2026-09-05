@@ -76,6 +76,12 @@ public:
     };
 
     virtual const char* name() const = 0;
+    // Whether this backend can actually change residency. The arena must ask rather than
+    // infer it from the device: a sparse-capable device fitted with the null backend would
+    // otherwise report pages as resident that were never bound, which is a lie that only
+    // shows up as garbage reads. When this is false the arena commits its whole address
+    // space up front and pin/unpin become bookkeeping.
+    virtual bool        canBind() const = 0;
     // Commit `binds` and order them against the compute timeline. A backend that cannot
     // actually unbind (the null backend) may ignore unbind entries.
     virtual VkResult    submit(const std::vector<Bind>& binds,
@@ -112,8 +118,13 @@ public:
     };
 
     SparseArena() = default;
+    // Two overloads, not `Config = {}` - see the same note on DeviceAllocator. A default
+    // argument is not a complete-class context, so Config's NSDMIs are not visible there.
     SparseArena(VkDevice, const MemoryTopology&, DeviceAllocator&,
-                std::unique_ptr<IBindBackend>, Config = {});
+                std::unique_ptr<IBindBackend>, Config);
+    SparseArena(VkDevice d, const MemoryTopology& t, DeviceAllocator& a,
+                std::unique_ptr<IBindBackend> b)
+    : SparseArena(d, t, a, std::move(b), Config{}) {}
     ~SparseArena();
 
     SparseArena(const SparseArena&)            = delete;
@@ -160,12 +171,23 @@ public:
         VkDeviceSize resident    = 0;   // physically backed right now
         uint64_t     pageCount = 0, residentPages = 0;
         uint64_t     bindSubmissions = 0, pagesBound = 0, pagesUnbound = 0;
+        // stagePin ran out of memory part way through a range. Silence here would look like
+        // a successful pin whose pages happen not to be resident.
+        uint64_t     pinFailures = 0;
     };
     Stats stats() const;
 
     VkDeviceSize pageSize()   const { return pageSize_; }
-    uint32_t     shardCount() const { return (uint32_t)shards_.size(); }
+    // Out of line on purpose. Inline, `shards_.size()` odr-uses std::vector<Shard> with Shard
+    // still incomplete; that compiles in the one TU where Shard is defined and fails in every
+    // other consumer, which is a confusing way to find out.
+    uint32_t     shardCount() const;
     const char*  backendName() const;
+
+    // True when the backend cannot change residency, so the arena committed everything up
+    // front. Callers that reason about memory saved have to branch on this; callers that only
+    // need correctness do not.
+    bool         committedWhole() const { return committedWhole_; }
 
 private:
     struct Shard;
@@ -183,6 +205,7 @@ private:
     VkDeviceSize       shardSize_ = 0;
     VkDeviceSize       cursor_    = 0;   // next free virtual address
     uint32_t           bindTypeIndex_ = ~0u;
+    bool               committedWhole_ = false;
 
     std::vector<Shard>              shards_;
     std::vector<Page>               pages_;    // one entry per page of the whole arena
