@@ -29,6 +29,36 @@ namespace eva {
 //
 // Thread-safe: every public entry point takes an internal lock.
 /////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////
+// AllocTag - names whatever the current scope allocates, in the timeline.
+//
+// The allocation trace is meant to be joined against the node schedule, and a few hundred
+// anonymous slab cuts cannot be. One RAII object around the interesting call turns the whole
+// scope's allocations into named rows. Thread-local so a tag set on one thread cannot mislabel
+// another thread's work; nested tags restore the outer one.
+/////////////////////////////////////////////////////////////////////////////////////////
+class AllocTag
+{
+public:
+    explicit AllocTag(const char* name) : prev_(current()) { current() = name; }
+    ~AllocTag() { current() = prev_; }
+
+    AllocTag(const AllocTag&)            = delete;
+    AllocTag& operator=(const AllocTag&) = delete;
+
+    // The tag in effect right now, or nullptr. Read by DeviceAllocator when it records an
+    // event; safe to call with no tag active.
+    static const char*& current()
+    {
+        static thread_local const char* tag = nullptr;
+        return tag;
+    }
+
+private:
+    const char* prev_ = nullptr;
+};
+
+
 class DeviceAllocator
 {
 public:

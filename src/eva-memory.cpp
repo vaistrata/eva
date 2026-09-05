@@ -198,6 +198,7 @@ void DeviceAllocator::recordEventLocked(const Suballocation& sub, MemoryTier req
     e.memoryTypeIndex = sub.memoryTypeIndex;
     e.requested       = requested;
     e.actual          = sub.tier;
+    e.tag             = AllocTag::current();
     if (cfg_.traceHeapUsage && sub.memoryTypeIndex != ~0u)
     {
         const MemoryTopology::Budget b = topo_->budget(topo_->heapOf(sub.memoryTypeIndex));
