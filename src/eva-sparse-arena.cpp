@@ -411,6 +411,7 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
         if (p.unbindStaged)
         {
             p.unbindStaged = false;  p.unbindSubmitted = true;
+            unbindSubmittedPages_.push_back(i);
             ++stats_.pagesUnbound;
             if (stats_.residentPages) --stats_.residentPages;
         }
@@ -437,15 +438,21 @@ VkResult SparseArena::waitIdle()
     std::lock_guard<std::mutex> lock(mutex_);
     // A-2. Only pages whose unbind actually reached the queue may have their memory
     // returned. Reclaiming on unbindStaged instead would hand the allocator memory the GPU
-    // can still reach through a binding that was never removed.
-    for (Page& p : pages_)
+    // can still reach through a binding that was never removed. unbindSubmittedPages_ is
+    // exactly that set, so this no longer walks the whole reservation to find it.
+    //
+    // The backend wait above happens before the lock and before any free, which is what makes
+    // reclaiming safe: the queue has drained, so no binding still points at this memory.
+    for (const size_t i : unbindSubmittedPages_)
     {
-        if (!p.unbindSubmitted) continue;
+        Page& p = pages_[i];
+        if (!p.unbindSubmitted) continue;      // defensive; the set should not contain others
         if (p.mem.valid()) alloc_->free(p.mem);
         p.mem             = DeviceAllocator::Suballocation{};
         p.bound           = false;
         p.unbindSubmitted = false;
     }
+    unbindSubmittedPages_.clear();
     return r;
 }
 

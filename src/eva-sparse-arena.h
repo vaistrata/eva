@@ -217,6 +217,13 @@ private:
     // are not bound yet), so one entry per staged page is exact. Cleared with staged_, and
     // like staged_ it survives a failed submission - see A-5 in flush().
     std::vector<size_t>             stagedPages_;
+    // Page indices whose unbind reached the queue and whose memory is therefore reclaimable
+    // at the next idle point. waitIdle() used to find them by scanning all of pages_, which
+    // is the same O(reservation) shape flush() had: 6.2 ms on a 14 GiB arena to reclaim one
+    // page. stageUnpin skips pages already unbindSubmitted and stagePin skips bound pages
+    // (unbindSubmitted implies bound), so a page cannot be added twice and cannot leave the
+    // set except through waitIdle(), which clears it wholesale.
+    std::vector<size_t>             unbindSubmittedPages_;
     Stats                           stats_{};
 };
 
