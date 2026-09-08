@@ -278,13 +278,18 @@ struct Device::Impl {
         bool graphicsPipelineLibrary = false;
 
         bool shaderFloat16 = false;
+        bool shaderInt8 = false;
         bool storageBuffer16BitAccess = false;
+        bool storageBuffer8BitAccess = false;
+        bool uniformAndStorageBuffer8BitAccess = false;
         bool shaderBufferFloat32AtomicAdd = false;
 
         bool cooperativeMatrix = false;
         bool vulkanMemoryModel = false;
         bool maintenance4 = false;
         bool subgroupSizeControl = false;
+        bool computeFullSubgroups = false;
+        bool shaderIntegerDotProduct = false;
 
         bool hostQueryReset = false;
         bool timelineSemaphore = false;
@@ -341,6 +346,11 @@ struct Device::Impl {
     uint32_t minSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.minSubgroupSize
     uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
     bool subgroupArithmetic = false;   // ARITHMETIC op class usable from compute shaders
+    bool subgroupClustered = false;    // CLUSTERED op class usable from compute shaders
+
+    // VkPhysicalDeviceShaderIntegerDotProductProperties (hardware dp4a; independent of the feature bit)
+    bool dp4aSignedAccelerated = false;            // int8 x int8
+    bool dp4aMixedSignednessAccelerated = false;   // int8 x uint8
 
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
@@ -1071,6 +1081,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto& q16BitStorage = queryChain.add(VkPhysicalDevice16BitStorageFeatures{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
     });
+
+    // Provided by VK_VERSION_1_2 (required for int8_t / uint8_t in SSBO / UBO blocks)
+    auto& q8BitStorage = queryChain.add(VkPhysicalDevice8BitStorageFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
+    });
     
     // Provided by VK_VERSION_1_2
     auto& qHostReset = queryChain.add(VkPhysicalDeviceHostQueryResetFeatures{
@@ -1131,6 +1146,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     // Provided by VK_VERSION_1_3 (required for ComputePipelineCreateInfo::requiredSubgroupSize)
     auto& qSubgroupSizeCtrl = queryChain.add(VkPhysicalDeviceSubgroupSizeControlFeatures{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+    });
+
+    // Provided by VK_VERSION_1_3 (required for GL_EXT_integer_dot_product)
+    auto& qIntegerDot = queryChain.add(VkPhysicalDeviceShaderIntegerDotProductFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
     });
 
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
@@ -1305,23 +1325,39 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     }
 
     // Provided by VK_VERSION_1_3 (enables VkPipelineShaderStageRequiredSubgroupSizeCreateInfo)
-    if (qSubgroupSizeCtrl.subgroupSizeControl)
+    // computeFullSubgroups (REQUIRE_FULL_SUBGROUPS_BIT) shares the struct; both requested as queried
+    if (qSubgroupSizeCtrl.subgroupSizeControl || qSubgroupSizeCtrl.computeFullSubgroups)
     {
         chain.add(VkPhysicalDeviceSubgroupSizeControlFeatures{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
-            .subgroupSizeControl = VK_TRUE,
+            .subgroupSizeControl = qSubgroupSizeCtrl.subgroupSizeControl,
+            .computeFullSubgroups = qSubgroupSizeCtrl.computeFullSubgroups,
         });
-        enabledFeatures.subgroupSizeControl = true;
+        enabledFeatures.subgroupSizeControl = bool(qSubgroupSizeCtrl.subgroupSizeControl);
+        enabledFeatures.computeFullSubgroups = bool(qSubgroupSizeCtrl.computeFullSubgroups);
+    }
+
+    // Provided by VK_VERSION_1_3 (enables GL_EXT_integer_dot_product / dotPacked4x8EXT)
+    if (qIntegerDot.shaderIntegerDotProduct)
+    {
+        chain.add(VkPhysicalDeviceShaderIntegerDotProductFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+            .shaderIntegerDotProduct = VK_TRUE,
+        });
+        enabledFeatures.shaderIntegerDotProduct = true;
     }
 
     // Provided by VK_VERSION_1_2
-    if (qFloat16Int8.shaderFloat16)
+    // shaderFloat16 / shaderInt8 are independent; each requested as queried
+    if (qFloat16Int8.shaderFloat16 || qFloat16Int8.shaderInt8)
     {
         chain.add(VkPhysicalDeviceShaderFloat16Int8Features{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
-            .shaderFloat16 = VK_TRUE,
+            .shaderFloat16 = qFloat16Int8.shaderFloat16,
+            .shaderInt8 = qFloat16Int8.shaderInt8,
         });
-        enabledFeatures.shaderFloat16 = true;
+        enabledFeatures.shaderFloat16 = bool(qFloat16Int8.shaderFloat16);
+        enabledFeatures.shaderInt8 = bool(qFloat16Int8.shaderInt8);
     }
 
     // Provided by VK_VERSION_1_1
@@ -1332,6 +1368,18 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .storageBuffer16BitAccess = VK_TRUE,
         });
         enabledFeatures.storageBuffer16BitAccess = true;
+    }
+
+    // Provided by VK_VERSION_1_2 (enables GL_EXT_shader_8bit_storage); each access kind requested as queried
+    if (q8BitStorage.storageBuffer8BitAccess || q8BitStorage.uniformAndStorageBuffer8BitAccess)
+    {
+        chain.add(VkPhysicalDevice8BitStorageFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
+            .storageBuffer8BitAccess = q8BitStorage.storageBuffer8BitAccess,
+            .uniformAndStorageBuffer8BitAccess = q8BitStorage.uniformAndStorageBuffer8BitAccess,
+        });
+        enabledFeatures.storageBuffer8BitAccess = bool(q8BitStorage.storageBuffer8BitAccess);
+        enabledFeatures.uniformAndStorageBuffer8BitAccess = bool(q8BitStorage.uniformAndStorageBuffer8BitAccess);
     }
 
     // Provided by VK_VERSION_1_2
@@ -1688,11 +1736,17 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .mixedDp4a         = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated),
             .signedDp4a        = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated),
         });
+        pImpl->dp4aSignedAccelerated = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated);
+        pImpl->dp4aMixedSignednessAccelerated = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated);
 
         // Arithmetic ops are only usable where the compute stage is one of the
         // stages the device reports subgroup support for.
         pImpl->subgroupArithmetic =
             (subgroupProps.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)
+            && (subgroupProps.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT);
+        // Clustered ops reduce per lane cluster (Q8_1 block absmax / sum: 8 lanes per block).
+        pImpl->subgroupClustered =
+            (subgroupProps.supportedOperations & VK_SUBGROUP_FEATURE_CLUSTERED_BIT)
             && (subgroupProps.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT);
 
         const VkPhysicalDeviceLimits& limits = props2.properties.limits;
@@ -1968,6 +2022,46 @@ uint32_t Device::maxSubgroupSize() const
 bool Device::supportsSubgroupArithmetic() const
 {
     return impl().subgroupArithmetic;
+}
+
+bool Device::supportsIntegerDotProduct() const
+{
+    return impl().features.shaderIntegerDotProduct;
+}
+
+bool Device::integerDotProduct4x8SignedAccelerated() const
+{
+    return impl().dp4aSignedAccelerated;
+}
+
+bool Device::integerDotProduct4x8MixedSignednessAccelerated() const
+{
+    return impl().dp4aMixedSignednessAccelerated;
+}
+
+bool Device::supportsSubgroupClustered() const
+{
+    return impl().subgroupClustered;
+}
+
+bool Device::supportsFullSubgroups() const
+{
+    return impl().features.computeFullSubgroups;
+}
+
+bool Device::supportsInt8() const
+{
+    return impl().features.shaderInt8;
+}
+
+bool Device::supports8BitStorage() const
+{
+    return impl().features.storageBuffer8BitAccess && impl().features.uniformAndStorageBuffer8BitAccess;
+}
+
+bool Device::int8Capable() const
+{
+    return supportsInt8() && supports8BitStorage() && supportsIntegerDotProduct() && supportsSubgroupClustered();
 }
 
 uint32_t Device::vendorID() const
@@ -3351,6 +3445,12 @@ ComputePipeline Device::createComputePipeline(const ComputePipelineCreateInfo& i
         EVA_ASSERT(impl().minSubgroupSize <= info.requiredSubgroupSize
                 && info.requiredSubgroupSize <= impl().maxSubgroupSize);
         stageInfo.pNext = &requiredSubgroupSizeInfo;
+    }
+
+    if (info.requireFullSubgroups)
+    {
+        EVA_ASSERT(impl().features.computeFullSubgroups);
+        stageInfo.flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
 
     VkPipelineRobustnessCreateInfoEXT robustnessInfo{

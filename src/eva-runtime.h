@@ -341,6 +341,21 @@ public:
     // True if compute shaders may use the subgroup arithmetic ops
     // (subgroupAdd / Mul / Min / Max and their variants).
     bool supportsSubgroupArithmetic() const;
+    // True if the shaderIntegerDotProduct feature was enabled (GL_EXT_integer_dot_product).
+    bool supportsIntegerDotProduct() const;
+    // Hardware-accelerated packed 4x8 dot products (properties; may be false even when the feature is on).
+    bool integerDotProduct4x8SignedAccelerated() const;           // int8 x int8
+    bool integerDotProduct4x8MixedSignednessAccelerated() const;  // int8 x uint8
+    // True if compute shaders may use the subgroup clustered ops (subgroupClusteredAdd / Max etc.).
+    bool supportsSubgroupClustered() const;
+    // True if the computeFullSubgroups feature was enabled (REQUIRE_FULL_SUBGROUPS_BIT usable).
+    bool supportsFullSubgroups() const;
+    // True if the shaderInt8 feature was enabled (int8_t arithmetic in shaders).
+    bool supportsInt8() const;
+    // True if both storageBuffer8BitAccess and uniformAndStorageBuffer8BitAccess were enabled.
+    bool supports8BitStorage() const;
+    // supportsInt8 && supports8BitStorage && supportsIntegerDotProduct && supportsSubgroupClustered.
+    bool int8Capable() const;
     // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
     uint32_t vendorID() const;
     uint32_t deviceID() const;
@@ -1164,6 +1179,9 @@ struct ComputePipelineCreateInfo {
     std::optional<PipelineLayout> layout;
     bool autoLayoutAllowAllStages = false;
     uint32_t requiredSubgroupSize = 0;
+    // Every subgroup is fully populated (REQUIRE_FULL_SUBGROUPS_BIT); local_size_x must be a
+    // multiple of the subgroup size. Needed for clustered / arithmetic reductions over all lanes.
+    bool requireFullSubgroups = false;
     bool robustBufferAccess = false;   // per-pipeline robust storage/uniform buffer access (VK_EXT_pipeline_robustness)
     // Keep the compiler's statistics and internal representations queryable
     // (VK_KHR_pipeline_executable_properties). The spec lets a driver compile
