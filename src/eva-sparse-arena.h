@@ -210,6 +210,13 @@ private:
     std::vector<Shard>              shards_;
     std::vector<Page>               pages_;    // one entry per page of the whole arena
     std::vector<IBindBackend::Bind> staged_;
+    // Page indices with pinStaged or unbindStaged set, parallel to staged_. flush() used to
+    // scan all of pages_ twice to find them, which is O(reservation) per flush and independent
+    // of how much was staged: 12.5 ms on a 14 GiB arena versus 30 us for the bind it was
+    // recording. A page never carries both flags (stageUnpin requires bound, pinStaged pages
+    // are not bound yet), so one entry per staged page is exact. Cleared with staged_, and
+    // like staged_ it survives a failed submission - see A-5 in flush().
+    std::vector<size_t>             stagedPages_;
     Stats                           stats_{};
 };
 

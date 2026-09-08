@@ -308,6 +308,14 @@ MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
                     break;
                 }
             }
+            // The page now carries neither flag, so it must leave the staged index too or
+            // flush() would commit a pin that was never staged.
+            for (size_t k = 0; k < stagedPages_.size(); ++k)
+                if (stagedPages_[k] == i)
+                {
+                    stagedPages_.erase(stagedPages_.begin() + long(k));
+                    break;
+                }
             p.unbindStaged = false;
             continue;                      // still bound; nothing new to allocate
         }
@@ -331,6 +339,7 @@ MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
         staged_.push_back(IBindBackend::Bind{
             sh.buffer, addr % shardSize_, pageSize_, p.mem.memory, p.mem.offset});
         p.pinStaged = true;
+        stagedPages_.push_back(i);
     }
     return landed;
 }
@@ -353,6 +362,7 @@ void SparseArena::stageUnpin(Region r)
         staged_.push_back(IBindBackend::Bind{
             sh.buffer, addr % shardSize_, pageSize_, VK_NULL_HANDLE, 0});
         p.unbindStaged = true;
+        stagedPages_.push_back(i);
     }
 }
 
@@ -374,16 +384,41 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
         return r;
     }
 
-    for (Page& p : pages_)
+    // Only the staged pages changed, so only they are visited. Scanning all of pages_ here
+    // was O(reservation) and independent of how much was staged - 12.5 ms on a 14 GiB arena
+    // against 30 us for the bind it was recording. See bench_flush.cpp.
+    //
+    // residentPages is maintained incrementally rather than recounted. The predicate is
+    // `bound && !unbindSubmitted`, and both transitions below cross it exactly once:
+    //
+    //   pinStaged    -> bound.           stagePin skips pages already bound, and
+    //                                    unbindSubmitted implies bound, so the page was
+    //                                    non-resident. +1.
+    //   unbindStaged -> unbindSubmitted. stageUnpin requires bound and skips pages already
+    //                                    unbindSubmitted, so the page was resident. -1.
+    //
+    // waitIdle() clears bound and unbindSubmitted together, leaving the predicate false
+    // either way, so it does not participate.
+    for (const size_t i : stagedPages_)
     {
-        if (p.pinStaged)    { p.bound = true;  p.pinStaged = false; ++stats_.pagesBound; }
-        if (p.unbindStaged) { p.unbindStaged = false; p.unbindSubmitted = true; ++stats_.pagesUnbound; }
+        Page& p = pages_[i];
+        if (p.pinStaged)
+        {
+            p.bound = true;  p.pinStaged = false;
+            ++stats_.pagesBound;
+            ++stats_.residentPages;
+        }
+        if (p.unbindStaged)
+        {
+            p.unbindStaged = false;  p.unbindSubmitted = true;
+            ++stats_.pagesUnbound;
+            if (stats_.residentPages) --stats_.residentPages;
+        }
     }
     staged_.clear();
+    stagedPages_.clear();
     ++stats_.bindSubmissions;
 
-    stats_.residentPages = 0;
-    for (const Page& p : pages_) if (p.bound && !p.unbindSubmitted) ++stats_.residentPages;
     stats_.resident = stats_.residentPages * pageSize_;
     return VK_SUCCESS;
 }
