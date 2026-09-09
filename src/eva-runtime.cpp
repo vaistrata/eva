@@ -289,6 +289,12 @@ struct Device::Impl {
 
         bool hostQueryReset = false;
         bool timelineSemaphore = false;
+
+        // Sparse binding. Without these enabled at vkCreateDevice the sparse path does not
+        // exist at all: creating a VK_BUFFER_CREATE_SPARSE_BINDING_BIT buffer is invalid
+        // usage, and MemoryTopology cannot measure the page granularity.
+        bool sparseBinding = false;
+        bool sparseResidencyBuffer = false;
         bool pipelineExecutableInfo = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         bool performanceCounterQueryPools = false;
@@ -1194,9 +1200,23 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     PNextChain chain;
     Device::Impl::Features enabledFeatures{};
 
-    chain.add(VkPhysicalDeviceFeatures2{
+    auto& features2Enable = chain.add(VkPhysicalDeviceFeatures2{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
     });
+
+    // Sparse binding, gated on the query like every other feature here. Asking for a feature
+    // the device does not advertise fails vkCreateDevice, and asking for neither leaves the
+    // whole sparse path unavailable - which is what happened before this block existed.
+    if (features2Query.features.sparseBinding)
+    {
+        features2Enable.features.sparseBinding = VK_TRUE;
+        enabledFeatures.sparseBinding = true;
+        if (features2Query.features.sparseResidencyBuffer)
+        {
+            features2Enable.features.sparseResidencyBuffer = VK_TRUE;
+            enabledFeatures.sparseResidencyBuffer = true;
+        }
+    }
 
 #ifdef EVA_ENABLE_WINDOW
     if (settings.enableWindow)
@@ -1640,6 +1660,10 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     // 질의하면 값이 정의되지 않으므로 MemoryTopology 의 선택적 질의가 전부 이 목록에 걸려
     // 있다.
     pImpl->memTopo = MemoryTopology(pd, pImpl->enabledExtensions);
+    // Page granularity is only observable through a real sparse buffer, which needs the
+    // device that the feature list above just created. Must be told what was actually
+    // enabled - probing with the feature off is invalid usage.
+    pImpl->memTopo.attachDevice(vkDevice, pImpl->features.sparseBinding);
     {
         DeviceAllocator::Config mc{};
         mc.traceEvents = false;   // setMemoryTracing() 으로 켠다

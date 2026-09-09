@@ -78,10 +78,21 @@ add_library(eva STATIC
     src/eva-runtime.cpp
     src/eva-spirv-reflect.cpp
 
+    # Memory subsystem. eva-runtime.cpp constructs MemoryTopology and DeviceAllocator, so
+    # these are not optional - without them the target does not link.
+    src/eva-memory-topology.cpp
+    src/eva-memory.cpp
+    src/eva-sparse-arena.cpp
+    src/eva-weight-stream.cpp
+
     src/eva-runtime.h
     src/eva-enums.h
     src/eva-error.h
     src/eva-native-factory.h
+    src/eva-memory-topology.h
+    src/eva-memory.h
+    src/eva-sparse-arena.h
+    src/eva-weight-stream.h
 )
 
 # Include directories
