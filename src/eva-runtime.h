@@ -777,6 +777,9 @@ public:
 
     // 디스크립터가 쓸 핸들. 오프셋 0, 크기는 텐서 크기 그대로다.
     Buffer   buffer(uint32_t tensor) const;
+    // 그 버퍼 안에서 이 텐서가 시작하는 바이트. tensorsPerShard == 1 이면 항상 0 이다.
+    uint64_t bufferOffset(uint32_t tensor) const;
+    uint32_t tensorsPerShard() const;
 
     // tensor 의 프론티어를 tokens 까지 올린다. 제출은 하지 않는다.
     Grow     ensure(uint32_t tensor, uint64_t tokens);
@@ -1290,6 +1293,18 @@ struct KVCacheCreateInfo {
     // 대가는 최대 이 토큰 수만큼 미리 상주하는 것이다. llama3-3B 기하에서 1024 토큰이면
     // 약 114 MiB - 14 GiB 예약의 0.8% 다.
     uint64_t growGranuleTokens = 0;
+
+    // 한 sparse 버퍼(shard)에 텐서를 몇 개 담을지. 0 = maxStorageBufferRange 가 허용하는
+    // 최대치.
+    //
+    // 이것이 성장 비용을 지배한다. vkQueueBindSparse 한 번의 실행 시간은 매핑 수보다
+    // **버퍼 수**에 붙는다 — 448 매핑을 4 개 이하의 버퍼에 담으면 0.6 us, 5 개부터
+    // 버퍼당 약 6 us 로 선형이다(vkbindwait 실측, 4→5 에서 계단). 텐서마다 버퍼를
+    // 하나씩 두면 llama3-3B 는 56 버퍼가 되어 343 us 가 된다.
+    //
+    // 1 = 텐서마다 버퍼 하나(이전 동작). 대가는 디스크립터 범위가 자기 텐서를 넘어
+    // 같은 shard 의 뒤쪽 텐서까지 덮게 되는 것이다 — 경계 검사가 그만큼 느슨해진다.
+    uint32_t tensorsPerShard = 0;
 
     // ensure() 가 이 값을 넘겨 붙이려 하면 Refused 를 돌려준다. 0 = 제한 없음.
     // heapBudget 을 여기 쓰지 마라 - NVK 는 힙을 넘겨 받아 주고 heapUsage 로 그걸

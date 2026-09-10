@@ -31,7 +31,8 @@ struct KVCache::Impl
     struct Slot
     {
         Region   region{};
-        Buffer   buffer{};
+        Buffer   buffer{};      // 이 텐서가 앉은 shard (여러 텐서가 공유할 수 있다)
+        uint64_t offset = 0;    // 그 shard 안에서의 바이트 오프셋
         uint64_t pinnedTokens = 0;
     };
     std::vector<Slot> slots;
@@ -40,6 +41,8 @@ struct KVCache::Impl
     uint64_t headStride    = 0;   // tokensCapacity * rowBytes
     uint64_t tensorBytes   = 0;   // numKVHeads * headStride, 페이지 정렬
     uint32_t tokensPerPage = 0;
+    uint64_t shardBytes    = 0;   // shard 하나의 크기 (= perShard * tensorBytes)
+    uint32_t perShard      = 1;   // shard 하나에 담은 텐서 수
     bool     sparse        = false;
 
     uint64_t growthEvents = 0, refusedGrowths = 0;

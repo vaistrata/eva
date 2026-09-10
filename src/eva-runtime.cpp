@@ -4010,28 +4010,39 @@ KVCache Device::createKVCache(const KVCacheCreateInfo& info)
     if (!pImpl)
         return KVCache{};
 
-    // 디스크립터가 쓸 핸들. shard 하나가 텐서 하나이므로 오프셋 0, 크기는 텐서 크기다.
-    // Buffer::Impl 은 이 TU 안에만 있으므로 이 마무리를 팩토리가 할 수 없다.
+    // 디스크립터가 쓸 핸들. 여러 텐서가 같은 shard 를 공유하므로 shard 마다 Buffer 를
+    // 하나만 감싸 재사용한다 - 텐서마다 감싸면 같은 VkBuffer 를 가리키는 Impl 이
+    // 56 개 생긴다. Buffer::Impl 은 이 TU 안에만 있으므로 팩토리가 못 하는 마무리다.
+    std::map<VkBuffer, Buffer> wrapped;
     for (uint32_t i = 0; i < (uint32_t)pImpl->slots.size(); i++)
     {
         const ArenaRange r = pImpl->arena->range(pImpl->slots[i].region);
-        if (r.buffer == VK_NULL_HANDLE || r.offset != 0)
+        if (r.buffer == VK_NULL_HANDLE)
         {
             delete pImpl;
             return KVCache{};
         }
+        pImpl->slots[i].offset = r.offset;
+
+        auto it = wrapped.find(r.buffer);
+        if (it != wrapped.end()) { pImpl->slots[i].buffer = it->second; continue; }
+
+        // 크기는 shard 전체다. Tensor::buffer() 가 (버퍼 크기 - 오프셋) 을 범위로 쓰므로
+        // 이 값이 shard 보다 작으면 뒤쪽 텐서의 바인딩 어서션이 걸린다.
         auto* bImpl = new Buffer::Impl(
             impl().vkDevice,
             r.buffer,
             VK_NULL_HANDLE,
-            r.size,
+            pImpl->shardBytes,
             (BUFFER_USAGE)(uint32_t)(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                                    | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                                    | VK_BUFFER_USAGE_TRANSFER_DST_BIT),
             MEMORY_PROPERTY::DEVICE_LOCAL,
             MEMORY_PROPERTY::DEVICE_LOCAL);
         bImpl->external = true;
-        pImpl->slots[i].buffer = *impl().buffers.insert(new Buffer::Impl*(bImpl)).first;
+        Buffer b = *impl().buffers.insert(new Buffer::Impl*(bImpl)).first;
+        wrapped.emplace(r.buffer, b);
+        pImpl->slots[i].buffer = b;
     }
 
     return *impl().kvCaches.insert(new KVCache::Impl*(pImpl)).first;

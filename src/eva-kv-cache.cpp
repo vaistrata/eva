@@ -67,30 +67,61 @@ KVCacheFactory::make(VkDevice device, const MemoryTopology& topo, DeviceAllocato
     // head 하나의 프론티어가 페이지 한 장을 채우는 토큰 수. 0 이 되지 않게 최소 1.
     im->tokensPerPage = (uint32_t)std::max<uint64_t>(1, page / std::max<uint64_t>(rowBytes, 1));
 
+    // shard 하나에 텐서를 몇 개 담는가. 이것이 성장 비용을 지배한다 - 바인드 한 번의
+    // 실행 시간은 매핑 수보다 버퍼 수에 붙고, 4 개 이하면 사실상 공짜다(vkbindwait).
+    uint32_t perShard = ci.tensorsPerShard;
+    const uint64_t maxRange = topo.maxStorageBufferRange();
+    const uint32_t fits = (uint32_t)std::max<uint64_t>(1, maxRange / tensorBytes);
+    if (!perShard) perShard = fits;              // 0 = 한도가 허용하는 최대
+    if (perShard > fits) perShard = fits;        // 한도를 넘으면 디스크립터가 못 이름한다
+    if (perShard > ci.numTensors) perShard = ci.numTensors;
+
+    // shard 크기의 실제 상한은 maxStorageBufferRange 가 아니다. NVK 는 2 GiB 짜리
+    // sparse 버퍼는 만들어 주고 3 GiB 는 VK_ERROR_OUT_OF_DEVICE_MEMORY 로 거절한다
+    // (vkbindwait 실측). 그 한도를 상수로 박으면 드라이버가 바뀔 때 조용히 틀리므로,
+    // 만들어 보고 안 되면 반으로 줄인다. 성공한 값이 그 장치의 답이다.
     SparseArena::Config acfg{};
-    acfg.virtualSize   = tensorBytes * ci.numTensors;
-    acfg.shardSize     = tensorBytes;          // 텐서마다 자기 shard 의 오프셋 0 을 받는다
     acfg.usage         = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                        | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     acfg.preferredTier = MemoryTier::Device;
     acfg.logLevel      = ci.logLevel;
 
-    im->arena = std::make_unique<SparseArena>(
-        device, topo, alloc,
-        canSparse ? makeVulkanBindBackend(device, sparseQueue) : makeNullBindBackend(),
-        acfg);
-
-    if (!im->arena->valid())
+    for (;;)
     {
+        acfg.shardSize   = tensorBytes * perShard;
+        acfg.virtualSize = acfg.shardSize *
+                           ((ci.numTensors + perShard - 1) / perShard);
+
+        im->arena = std::make_unique<SparseArena>(
+            device, topo, alloc,
+            canSparse ? makeVulkanBindBackend(device, sparseQueue) : makeNullBindBackend(),
+            acfg);
+
+        if (im->arena->valid())
+            break;
+
+        im->arena.reset();
+        if (perShard <= 1)
+        {
+            if (ci.logLevel >= 1)
+                std::fprintf(stderr, "[eva] KVCache: 아레나 %.2f GiB 예약 실패\n",
+                             acfg.virtualSize / 1073741824.0);
+            delete im;
+            return nullptr;
+        }
+        const uint32_t next = perShard / 2;
         if (ci.logLevel >= 1)
-            std::fprintf(stderr, "[eva] KVCache: 아레나 %.2f GiB 예약 실패\n",
-                         acfg.virtualSize / 1073741824.0);
-        delete im;
-        return nullptr;
+            std::fprintf(stderr, "[eva] KVCache: shard %.2f GiB 를 못 만들었다 - "
+                                 "텐서/shard 를 %u -> %u 로 줄인다\n",
+                         acfg.shardSize / 1073741824.0, perShard, next);
+        perShard = next;
     }
 
     im->sparse = !im->arena->committedWhole();
+
+    im->shardBytes = acfg.shardSize;
+    im->perShard   = perShard;
 
     im->slots.resize(ci.numTensors);
     for (uint32_t i = 0; i < ci.numTensors; i++)
@@ -103,15 +134,6 @@ KVCacheFactory::make(VkDevice device, const MemoryTopology& topo, DeviceAllocato
             delete im;
             return nullptr;
         }
-        // shardSize == tensorBytes 이므로 base 는 shard 경계에 정확히 떨어져야 한다.
-        // 아니면 range() 가 0 이 아닌 오프셋을 주고, 이 클래스의 전제가 깨진다.
-        if (im->slots[i].region.base % tensorBytes != 0)
-        {
-            if (ci.logLevel >= 1)
-                std::fprintf(stderr, "[eva] KVCache: 텐서 %u 가 shard 오프셋 0 이 아니다\n", i);
-            delete im;
-            return nullptr;
-        }
     }
 
     // 상주가 아니면 아레나가 전부를 미리 붙였다는 뜻이다. 프론티어 개념이 없으므로
@@ -121,9 +143,10 @@ KVCacheFactory::make(VkDevice device, const MemoryTopology& topo, DeviceAllocato
 
     if (ci.logLevel >= 1)
         std::fprintf(stderr,
-            "[eva] KVCache: 텐서 %u x %.2f MiB = %.2f GiB 가상, 페이지 %llu KiB, "
-            "페이지당 %u 토큰, %s\n",
+            "[eva] KVCache: 텐서 %u x %.2f MiB = %.2f GiB 가상, shard %u개 x %.2f GiB "
+            "(텐서 %u/shard), 페이지 %llu KiB, 페이지당 %u 토큰, %s\n",
             ci.numTensors, tensorBytes / 1048576.0, acfg.virtualSize / 1073741824.0,
+            im->arena->shardCount(), acfg.shardSize / 1073741824.0, perShard,
             (unsigned long long)(im->arena->pageSize() >> 10), im->tokensPerPage,
             im->sparse ? "sparse" : "전부 커밋(폴백)");
 
@@ -146,6 +169,14 @@ Buffer KVCache::buffer(uint32_t tensor) const
     EVA_ASSERT(tensor < impl().slots.size());
     return impl().slots[tensor].buffer;
 }
+
+uint64_t KVCache::bufferOffset(uint32_t tensor) const
+{
+    EVA_ASSERT(tensor < impl().slots.size());
+    return impl().slots[tensor].offset;
+}
+
+uint32_t KVCache::tensorsPerShard() const { return impl().perShard; }
 
 KVCache::Grow KVCache::ensure(uint32_t tensor, uint64_t tokens)
 {
