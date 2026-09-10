@@ -13,6 +13,7 @@
 #include <iostream> // std::cin (device selection)
 #include "eva-native-factory.h"
 #include "eva-runtime.h"
+#include "eva-kv-cache.h"
 #include "eva-memory.h"
 
 // #define USE_DEBUG_PRINTF 1
@@ -319,6 +320,7 @@ struct Device::Impl {
     std::unique_ptr<DeviceAllocator> memAlloc;
 
     std::set<Buffer::Impl**> buffers;
+    std::set<KVCache::Impl**> kvCaches;
     std::set<Image::Impl**> images;
     std::set<Sampler::Impl**> samplers;
 
@@ -567,6 +569,10 @@ struct Buffer::Impl {
     DeviceAllocator*               owner = nullptr;
     DeviceAllocator::Suballocation sub{};
 
+    // 이 Impl 이 VkBuffer 를 소유하지 않는다. KVCache 가 아레나 shard 를 디스크립터에
+    // 넘기기 위해 감쌀 때 쓴다 - 소멸자가 남의 버퍼를 vkDestroyBuffer 하면 안 된다.
+    bool                           external = false;
+
     Impl(VkDevice vkDevice, 
         VkBuffer vkBuffer, 
         VkDeviceMemory vkMemory, 
@@ -582,6 +588,7 @@ struct Buffer::Impl {
     , reqMemProps(reqMemProps)
     , memProps(memProps) {}
     ~Impl() {
+        if (external) return;   // 감싸기만 한 핸들: 버퍼도 메모리도 남의 것이다
         vkDestroyBuffer(vkDevice, vkBuffer, nullptr);
         if (owner)
         {
@@ -1901,6 +1908,8 @@ Device::Impl::~Impl()
     deleter(computePipelines);
     
     deleter(buffers);
+    // buffers 다음. 위의 external 버퍼들이 이 아레나의 shard 를 감싸고 있었다.
+    deleter(kvCaches);
     deleter(images);
     deleter(samplers);
     
@@ -3963,6 +3972,72 @@ Buffer Device::createBuffer(const BufferCreateInfo& info)
     return *impl().buffers.insert(new Buffer::Impl*(pImpl)).first;
 }
 
+/////////////////////////////////////////////////////////////////////////////////////////
+// KVCache
+/////////////////////////////////////////////////////////////////////////////////////////
+KVCache Device::createKVCache(const KVCacheCreateInfo& info)
+{
+    if (!impl().memAlloc)
+        return KVCache{};
+
+    // sparse 바인드는 큐 패밀리 속성이다. 기능만 켜도 SPARSE_BINDING 을 가진 패밀리의
+    // 큐가 없으면 vkQueueBindSparse 를 부를 곳이 없다. NVK/RADV 는 컴퓨트 패밀리가
+    // 겸하지만 그걸 가정하지 않고 실제로 확인한다.
+    VkQueue sparseQueue = VK_NULL_HANDLE;
+    if (impl().features.sparseBinding)
+    {
+        uint32_t famCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(impl().vkPhysicalDevice, &famCount, nullptr);
+        std::vector<VkQueueFamilyProperties> fams(famCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(impl().vkPhysicalDevice, &famCount, fams.data());
+
+        for (QueueType t : {queue_compute, queue_transfer, queue_graphics})
+        {
+            const uint32_t qf = impl().qfIndex[t];
+            if (qf == uint32_t(-1) || qf >= famCount) continue;
+            if (!(fams[qf].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT)) continue;
+            if (impl().queues[qf].empty()) continue;
+            sparseQueue = impl().queues[qf][0].impl().vkQueue;
+            break;
+        }
+        if (sparseQueue == VK_NULL_HANDLE && info.logLevel >= 1)
+            std::fprintf(stderr, "[eva] KVCache: sparseBinding 은 켜져 있지만 "
+                                 "SPARSE_BINDING 큐 패밀리가 없다 - 폴백\n");
+    }
+
+    KVCache::Impl* pImpl = KVCacheFactory::make(
+        impl().vkDevice, impl().memTopo, *impl().memAlloc, sparseQueue, info);
+    if (!pImpl)
+        return KVCache{};
+
+    // 디스크립터가 쓸 핸들. shard 하나가 텐서 하나이므로 오프셋 0, 크기는 텐서 크기다.
+    // Buffer::Impl 은 이 TU 안에만 있으므로 이 마무리를 팩토리가 할 수 없다.
+    for (uint32_t i = 0; i < (uint32_t)pImpl->slots.size(); i++)
+    {
+        const ArenaRange r = pImpl->arena->range(pImpl->slots[i].region);
+        if (r.buffer == VK_NULL_HANDLE || r.offset != 0)
+        {
+            delete pImpl;
+            return KVCache{};
+        }
+        auto* bImpl = new Buffer::Impl(
+            impl().vkDevice,
+            r.buffer,
+            VK_NULL_HANDLE,
+            r.size,
+            (BUFFER_USAGE)(uint32_t)(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                   | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                                   | VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            MEMORY_PROPERTY::DEVICE_LOCAL,
+            MEMORY_PROPERTY::DEVICE_LOCAL);
+        bImpl->external = true;
+        pImpl->slots[i].buffer = *impl().buffers.insert(new Buffer::Impl*(bImpl)).first;
+    }
+
+    return *impl().kvCaches.insert(new KVCache::Impl*(pImpl)).first;
+}
+
+
 uint8_t* Buffer::map(uint64_t offset, uint64_t size)
 {
     EVA_ASSERT(*this);
@@ -5854,6 +5929,7 @@ DESTROY_MACRO(PipelineLayout)
 DESTROY_MACRO(DescriptorPool)
 DESTROY_MACRO(DescriptorSet)
 DESTROY_MACRO(QueryPool)
+DESTROY_MACRO(KVCache)
 #ifdef EVA_ENABLE_WINDOW
     DESTROY_MACRO(Window)
 #endif

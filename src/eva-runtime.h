@@ -67,6 +67,7 @@ class PipelineLayout;
 class DescriptorPool;
 class DescriptorSet;
 class QueryPool;
+class KVCache;
 
 class Window;
 class RaytracingPipeline;
@@ -94,6 +95,7 @@ class AccelerationStructure;
     friend class DescriptorPool; \
     friend class DescriptorSet; \
     friend class QueryPool; \
+    friend class KVCache; \
     friend class Window; \
     friend class AccelerationStructure; \
     friend class Submitting;
@@ -126,6 +128,7 @@ struct ShaderModuleCreateInfo;
 struct ComputePipelineCreateInfo;
 struct RaytracingPipelineCreateInfo;
 struct BufferCreateInfo;
+struct KVCacheCreateInfo;
 struct ImageCreateInfo;
 struct ImageViewDesc;
 struct SamplerCreateInfo;
@@ -309,6 +312,10 @@ public:
     ComputePipeline createComputePipeline(const ComputePipelineCreateInfo& info);
 
     Buffer createBuffer(const BufferCreateInfo& info) ;
+
+    // KV 캐시 전용 sparse 예약. 지원되지 않으면 유효하지 않은 핸들이 아니라
+    // sparse()==false 인 핸들이 돌아온다 - 호출자는 경로를 하나만 기록한다.
+    KVCache createKVCache(const KVCacheCreateInfo& info);
     Image createImage(const ImageCreateInfo& info);
     Sampler createSampler(const SamplerCreateInfo& info);
     DescriptorSetLayout createDescriptorSetLayout(DescriptorSetLayoutDesc desc); // call-by-value is ok because at least one copy is necessary for lvalue
@@ -729,6 +736,73 @@ public:
     );
 
 };
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// KVCache - 토큰이 늘어나는 만큼만 물리 메모리를 붙이는 KV 캐시 예약.
+//
+// 왜 Buffer 가 아니라 별도 타입인가: KV 캐시는 [Hkv, M, Dh] 레이아웃이라 토큰 축이
+// 가운데 있다. 토큰이 하나 늘면 head 마다 Dh*bytes 만큼 서로 다른 위치에 붙는다 -
+// 즉 프론티어가 하나가 아니라 Hkv 개다. 그걸 호출자가 알 필요는 없으니 여기서 감춘다.
+//
+// 주소는 고정이다. ensure() 가 무엇을 붙이든 buffer(i) 가 돌려주는 핸들과 그 오프셋은
+// 바뀌지 않으므로, 기록해 둔 디스크립터와 커맨드 버퍼를 다시 쓸 필요가 없다.
+// (측정 근거: NVK 에서 매핑 하나당 0.044~0.047 us, 제출 하한 9.3 us, 784,000 매핑까지 평평)
+//
+// sparse 를 못 쓰는 장치에서는 sparse()==false 가 되고 예약 전체가 처음부터 물리
+// 메모리를 갖는다. 동작은 같고 절약만 사라진다 - 호출자가 분기할 이유는 통계뿐이다.
+/////////////////////////////////////////////////////////////////////////////////////////
+class KVCache {
+    VULKAN_CLASS_COMMON2(KVCache)
+    // Impl 은 위 매크로가 private 으로 선언한다. 정의는 eva-kv-cache.h 에 있고 그 안의
+    // 팩토리가 Impl 을 이름으로 불러야 하므로, 그 팩토리 하나만 친구로 들인다.
+    // (Vulkan 타입이 시그니처에 있어서 여기서 자유 함수로 선언할 수 없다)
+    friend struct KVCacheFactory;
+public:
+
+    // ensure() 의 결과. Refused/Failed 를 성공과 같은 값으로 뭉개지 않는 이유는,
+    // 붙지 않은 페이지를 읽으면 (strict residency 에서) 조용히 0 이 나오기 때문이다.
+    enum class Grow {
+        Ok,               // 새 페이지를 stage 했다. commit() 이 필요하다
+        AlreadyResident,  // 이미 상주. 대부분의 디코드 스텝이 여기서 끝난다
+        Refused,          // 예산이 거절했다 - 호출자가 컨텍스트를 줄여야 한다
+        Failed,           // 용량 초과 또는 진짜 OOM
+    };
+
+    bool     sparse() const;          // false = 처음부터 전부 물리 백킹
+    uint32_t tensorCount() const;
+    uint64_t tensorBytes() const;     // 텐서 하나의 가상 크기 (= Hkv*M*Dh*bytes, 페이지 정렬)
+    uint64_t tokensCapacity() const;  // M
+    uint32_t tokensPerPage() const;   // 페이지 한 장이 담는 토큰 수 (head 하나 기준)
+
+    // 디스크립터가 쓸 핸들. 오프셋 0, 크기는 텐서 크기 그대로다.
+    Buffer   buffer(uint32_t tensor) const;
+
+    // tensor 의 프론티어를 tokens 까지 올린다. 제출은 하지 않는다.
+    Grow     ensure(uint32_t tensor, uint64_t tokens);
+    // 모든 텐서에 대해 ensure(). 하나라도 Ok 면 Ok, 하나라도 실패면 그 실패를 돌려준다.
+    Grow     ensureAll(uint64_t tokens);
+
+    // stage 된 것을 한 번의 vkQueueBindSparse 로 커밋하고 완료를 기다린다.
+    Result   commit();
+
+    // 프론티어를 0 으로 되돌리고 물리 메모리를 반납한다. 주소는 그대로다.
+    Result   releaseAll();
+
+    struct Stats {
+        uint64_t reservedBytes = 0;   // 가상 - 항상 tensorCount * tensorBytes
+        uint64_t residentBytes = 0;   // 지금 실제로 붙어 있는 것
+        uint64_t residentPages = 0;
+        uint64_t bindSubmissions = 0;
+        uint64_t pagesBound = 0, pagesUnbound = 0;
+        uint64_t pinFailures = 0;
+        uint64_t growthEvents = 0;    // ensure() 가 실제로 stage 한 횟수
+        uint64_t refusedGrowths = 0;
+        uint64_t pinnedTokensMax = 0; // 어느 텐서든 가장 앞선 프론티어
+    };
+    Stats    stats() const;
+};
+
 
 
 class Image {
@@ -1191,6 +1265,38 @@ struct BufferCreateInfo {
     uint64_t size;
     BUFFER_USAGE usage;
     MEMORY_PROPERTY reqMemProps;
+};
+
+
+struct KVCacheCreateInfo {
+    // 기하. tensorBytes = numKVHeads * tokensCapacity * headDim * bytesPerElement 이고,
+    // 이걸 페이지 크기로 올림한 값이 텐서 하나가 차지하는 가상 공간이다.
+    uint64_t tokensCapacity = 0;      // M - 이 예약이 담을 수 있는 최대 토큰 수
+    uint32_t numKVHeads     = 0;      // Hkv
+    uint32_t headDim        = 0;      // Dh
+    uint32_t bytesPerElement = 2;     // fp16
+    uint32_t numTensors     = 0;      // 보통 2 * 레이어 수 (K/V 각각)
+
+    // 프론티어를 이 토큰 배수로 올려 붙인다. 0 = 페이지 한 장 단위(가장 촘촘).
+    //
+    // 왜 있는가: commit() 비용은 vkQueueBindSparse 자체(~200 us, 안정적)가 아니라
+    // 그 뒤의 host wait 가 지배하고, 그것이 같은 바이너리에서 21 us ~ 4.2 ms 로
+    // 흔들린다(실측). 그래서 줄여야 하는 것은 한 번의 비용이 아니라 횟수다.
+    //
+    // 주의 - 이것은 "미리 앞서 붙이기"가 아니다. 요청에 상수를 더하는 방식은 페이지
+    // 경계의 위상만 옮기고 교차 빈도를 전혀 줄이지 않는다(실측: 상수 1024 를 더해도
+    // commit 13회 그대로). 빈도를 줄이는 것은 배수를 키우는 것뿐이다.
+    //
+    // 대가는 최대 이 토큰 수만큼 미리 상주하는 것이다. llama3-3B 기하에서 1024 토큰이면
+    // 약 114 MiB - 14 GiB 예약의 0.8% 다.
+    uint64_t growGranuleTokens = 0;
+
+    // ensure() 가 이 값을 넘겨 붙이려 하면 Refused 를 돌려준다. 0 = 제한 없음.
+    // heapBudget 을 여기 쓰지 마라 - NVK 는 힙을 넘겨 받아 주고 heapUsage 로 그걸
+    // 그대로 보고한다(측정됨). 배치 근거로 쓸 수 있는 값이 아니다.
+    uint64_t residentBudgetBytes = 0;
+
+    uint32_t logLevel = 0;
 };
 
 

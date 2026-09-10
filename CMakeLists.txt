@@ -84,11 +84,13 @@ add_library(eva STATIC
     src/eva-memory.cpp
     src/eva-sparse-arena.cpp
     src/eva-weight-stream.cpp
+    src/eva-kv-cache.cpp
 
     src/eva-runtime.h
     src/eva-enums.h
     src/eva-error.h
     src/eva-native-factory.h
+    src/eva-kv-cache.h
     src/eva-memory-topology.h
     src/eva-memory.h
     src/eva-sparse-arena.h
