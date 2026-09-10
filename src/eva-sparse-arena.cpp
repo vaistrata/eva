@@ -299,7 +299,20 @@ MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
     const size_t last  = size_t((r.base + r.size + pageSize_ - 1) / pageSize_);
     MemoryTier landed = preferred;
 
-    for (size_t i = first; i < last && i < pages_.size(); ++i)
+    // 페이지마다 할당하지 않는다. 붙일 페이지가 연속이면 **한 번** 할당해서 페이지별로
+    // 나눠 준다. 이유가 둘이다.
+    //
+    //  1. 비용. 4 KiB 마다 allocateInType 을 부르면 granule 256 토큰에서 7,168 번이다
+    //     (실측 321 us). 런으로 묶으면 448 번이 된다.
+    //  2. 결정성. flush() 의 인접 합치기는 자원 오프셋과 **메모리 오프셋**이 둘 다
+    //     이어져야 동작한다. 페이지마다 따로 할당하면 그것이 할당기 운에 달리는데,
+    //     런으로 잡으면 정의상 이어진다.
+    //
+    // free() 는 범위 기반이다(슬랩을 memory 로 찾아 release(offset, size)). 그래서 런을
+    // 페이지별 Suballocation 으로 쪼개 두고 하나씩 반납해도 맞는다 — waitIdle() 의
+    // 페이지 단위 회수 경로를 바꾸지 않아도 된다.
+    size_t i = first;
+    while (i < last && i < pages_.size())
     {
         Page& p = pages_[i];
 
@@ -328,29 +341,88 @@ MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
                     break;
                 }
             p.unbindStaged = false;
+            ++i;
             continue;                      // still bound; nothing new to allocate
         }
-        if (p.bound || p.pinStaged) continue;
+        if (p.bound || p.pinStaged) { ++i; continue; }
 
-        VkMemoryRequirements mr{};
-        mr.size           = pageSize_;
-        mr.alignment      = pageSize_;
-        mr.memoryTypeBits = 1u << bindTypeIndex_;
-        if (alloc_->allocateInType(mr, bindTypeIndex_, &p.mem) != VK_SUCCESS)
+        // 할당이 필요한 연속 구간의 끝을 찾는다. Bind 는 버퍼 하나를 가리키므로
+        // shard 경계에서 끊는다.
+        const size_t shardIdx = size_t((VAddr(i) * pageSize_) / shardSize_);
+        size_t j = i;
+        while (j < last && j < pages_.size())
         {
-            // Out of memory part way through. Everything staged so far stays staged and
-            // valid; the caller is told by the tier, and stats records how far it got.
-            ++stats_.pinFailures;
-            return MemoryTier::_count;
+            const Page& q = pages_[j];
+            if (q.unbindStaged || q.bound || q.pinStaged) break;
+            if (size_t((VAddr(j) * pageSize_) / shardSize_) != shardIdx) break;
+            ++j;
         }
-        landed = p.mem.tier;
+        const size_t runLen = j - i;
 
-        const VAddr addr = i * pageSize_;
-        const Shard& sh  = shards_[size_t(addr / shardSize_)];
-        staged_.push_back(IBindBackend::Bind{
-            sh.buffer, addr % shardSize_, pageSize_, p.mem.memory, p.mem.offset});
-        p.pinStaged = true;
-        stagedPages_.push_back(i);
+        const VAddr  addr = VAddr(i) * pageSize_;
+        const Shard& sh   = shards_[shardIdx];
+
+        // 런을 한 번에 잡아 본다. 조각화 때문에 큰 요청이 실패할 수 있으므로, 실패하면
+        // 아래 페이지 단위 경로로 떨어진다 — 느려질 뿐 실패하지는 않는다.
+        DeviceAllocator::Suballocation run{};
+        bool runOk = false;
+        if (runLen > 1)
+        {
+            VkMemoryRequirements mr{};
+            mr.size           = VkDeviceSize(runLen) * pageSize_;
+            mr.alignment      = pageSize_;
+            mr.memoryTypeBits = 1u << bindTypeIndex_;
+            runOk = alloc_->allocateInType(mr, bindTypeIndex_, &run) == VK_SUCCESS;
+        }
+
+        if (runOk)
+        {
+            for (size_t k = 0; k < runLen; ++k)
+            {
+                Page& q = pages_[i + k];
+                q.mem        = run;
+                q.mem.offset = run.offset + VkDeviceSize(k) * pageSize_;
+                // 마지막 페이지가 남은 전부를 가진다. 할당기가 요청보다 크게 줬을 때
+                // 그 나머지가 어느 페이지에도 속하지 않으면 반납되지 않고 샌다.
+                q.mem.size   = (k + 1 == runLen)
+                             ? run.size - VkDeviceSize(k) * pageSize_
+                             : pageSize_;
+                if (run.mapped) q.mem.mapped = run.mapped + VkDeviceSize(k) * pageSize_;
+                q.pinStaged = true;
+                stagedPages_.push_back(i + k);
+            }
+            landed = run.tier;
+            staged_.push_back(IBindBackend::Bind{
+                sh.buffer, addr % shardSize_,
+                VkDeviceSize(runLen) * pageSize_, run.memory, run.offset});
+            i = j;
+            continue;
+        }
+
+        for (size_t k = i; k < j; ++k)
+        {
+            Page& q = pages_[k];
+            VkMemoryRequirements mr{};
+            mr.size           = pageSize_;
+            mr.alignment      = pageSize_;
+            mr.memoryTypeBits = 1u << bindTypeIndex_;
+            if (alloc_->allocateInType(mr, bindTypeIndex_, &q.mem) != VK_SUCCESS)
+            {
+                // Out of memory part way through. Everything staged so far stays staged and
+                // valid; the caller is told by the tier, and stats records how far it got.
+                ++stats_.pinFailures;
+                return MemoryTier::_count;
+            }
+            landed = q.mem.tier;
+
+            const VAddr  a2  = VAddr(k) * pageSize_;
+            const Shard& sh2 = shards_[size_t(a2 / shardSize_)];
+            staged_.push_back(IBindBackend::Bind{
+                sh2.buffer, a2 % shardSize_, pageSize_, q.mem.memory, q.mem.offset});
+            q.pinStaged = true;
+            stagedPages_.push_back(k);
+        }
+        i = j;
     }
     return landed;
 }
@@ -396,6 +468,7 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
     // 자원 오프셋과 메모리 오프셋이 **둘 다** 이어져야 합칠 수 있다 - 메모리가 끊기면
     // 한 항목으로 쓸 수 없다.
     const size_t _staged = staged_.size();
+    const size_t _pages  = stagedPages_.size();
     size_t _merged = 0;
     if (staged_.size() > 1)
     {
@@ -469,9 +542,13 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
         if (auto *vb = dynamic_cast<VulkanBindBackend *>(backend_.get()))
         { g = vb->lastGroupUs; c = vb->lastCallUs; }
         std::fprintf(stderr,
-            "[eva] arena flush: 페이지 %zu -> 매핑 %zu (%zu 합침) · submit %.1f us "
-            "(그룹핑 %.1f + 호출 %.1f) · 페이지부기 %.1f us\n",
+            // "항목" 은 staged_ 의 크기다. stagePin 이 이미 연속 런을 하나로 묶어
+            // 넣으므로 보통 여기서 더 합칠 것이 없다(합침 0) — 합침이 0 이 아니면
+            // 별개 stagePin 호출들이 서로 인접했다는 뜻이다.
+            "[eva] arena flush: 항목 %zu -> %zu (%zu 합침) · 상주페이지 +%llu · "
+            "submit %.1f us (그룹핑 %.1f + 호출 %.1f) · 페이지부기 %.1f us\n",
             _staged, _staged - _merged, _merged,
+            (unsigned long long)_pages,
             std::chrono::duration<double, std::micro>(_t1 - _t0).count(), g, c,
             std::chrono::duration<double, std::micro>(_t2 - _t1).count());
     }
