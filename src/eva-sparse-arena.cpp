@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <chrono>
 #include <cstring>
 
 namespace eva {
@@ -16,6 +17,9 @@ class VulkanBindBackend final : public IBindBackend
 public:
     VulkanBindBackend(VkDevice d, VkQueue q) : device_(d), queue_(q) {}
 
+    // 계측용. flush() 가 읽어 간다 — 그룹핑(호스트 CPU)과 제출 호출을 가른다.
+    double lastGroupUs = 0.0, lastCallUs = 0.0;
+
     const char* name() const override { return "vkQueueBindSparse"; }
     bool        canBind() const override { return queue_ != VK_NULL_HANDLE; }
 
@@ -24,6 +28,8 @@ public:
                     VkSemaphore signal, uint64_t signalValue) override
     {
         if (queue_ == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+
+        const auto _tg = std::chrono::steady_clock::now();
 
         // One VkSparseBufferMemoryBindInfo per buffer, so group by buffer first. The arena
         // stages in address order, which means the groups are already contiguous, but the
@@ -68,7 +74,12 @@ public:
         bi.signalSemaphoreCount = signal != VK_NULL_HANDLE ? 1u : 0u;
         bi.pSignalSemaphores    = signal != VK_NULL_HANDLE ? &signal : nullptr;
 
-        return vkQueueBindSparse(queue_, 1, &bi, VK_NULL_HANDLE);
+        const auto _tc = std::chrono::steady_clock::now();
+        const VkResult _r = vkQueueBindSparse(queue_, 1, &bi, VK_NULL_HANDLE);
+        const auto _te = std::chrono::steady_clock::now();
+        lastGroupUs = std::chrono::duration<double, std::micro>(_tc - _tg).count();
+        lastCallUs  = std::chrono::duration<double, std::micro>(_te - _tc).count();
+        return _r;
     }
 
     VkResult waitIdle() override
@@ -376,7 +387,36 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
     // common case once the working set stops growing, so it would look intermittent.
     if (staged_.empty() && signal == VK_NULL_HANDLE) return VK_SUCCESS;
 
+    // 인접한 것을 하나로 합친다. 드라이버가 무는 값은 매핑 **개수**이고, 그 개수는
+    // 페이지 수가 아니라 **연속 구간 수**여야 한다. 흩어진 4 KiB 항목 448 개는
+    // vkQueueBindSparse 호출에서 약 204 us 인데, 같은 개수가 연속이면 6~32 us 다
+    // (vkbindwait --stride 실측: 연속 5.6 us vs 간격 2 페이지 208 us).
+    //
+    // stagePin 이 주소 순서로 넣으므로 인접 여부는 바로 앞 항목만 보면 된다.
+    // 자원 오프셋과 메모리 오프셋이 **둘 다** 이어져야 합칠 수 있다 - 메모리가 끊기면
+    // 한 항목으로 쓸 수 없다.
+    const size_t _staged = staged_.size();
+    size_t _merged = 0;
+    if (staged_.size() > 1)
+    {
+        size_t w = 0;
+        for (size_t i = 1; i < staged_.size(); ++i)
+        {
+            IBindBackend::Bind &a = staged_[w];
+            const IBindBackend::Bind &b = staged_[i];
+            const bool joins = a.buffer == b.buffer &&
+                               a.memory == b.memory &&
+                               a.resourceOffset + a.size == b.resourceOffset &&
+                               a.memoryOffset   + a.size == b.memoryOffset;
+            if (joins) { a.size += b.size; ++_merged; }
+            else       { staged_[++w] = b; }
+        }
+        staged_.resize(w + 1);
+    }
+
+    const auto _t0 = std::chrono::steady_clock::now();
     const VkResult r = backend_->submit(staged_, wait, waitValue, signal, signalValue);
+    const auto _t1 = std::chrono::steady_clock::now();
     if (r != VK_SUCCESS)
     {
         // A-5. Keep the batch. Dropping it loses binds the caller believes are queued, and
@@ -419,6 +459,22 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
     staged_.clear();
     stagedPages_.clear();
     ++stats_.bindSubmissions;
+
+    if (cfg_.logLevel >= 2)
+    {
+        const auto _t2 = std::chrono::steady_clock::now();
+        // submit 안쪽은 백엔드가 재 둔다 — Vulkan 것은 vkQueueBindSparse 호출뿐이고
+        // 나머지는 전부 호스트 CPU 다. 이 셋을 갈라야 무엇을 고칠지가 정해진다.
+        double g = 0.0, c = 0.0;
+        if (auto *vb = dynamic_cast<VulkanBindBackend *>(backend_.get()))
+        { g = vb->lastGroupUs; c = vb->lastCallUs; }
+        std::fprintf(stderr,
+            "[eva] arena flush: 페이지 %zu -> 매핑 %zu (%zu 합침) · submit %.1f us "
+            "(그룹핑 %.1f + 호출 %.1f) · 페이지부기 %.1f us\n",
+            _staged, _staged - _merged, _merged,
+            std::chrono::duration<double, std::micro>(_t1 - _t0).count(), g, c,
+            std::chrono::duration<double, std::micro>(_t2 - _t1).count());
+    }
 
     stats_.resident = stats_.residentPages * pageSize_;
     return VK_SUCCESS;
