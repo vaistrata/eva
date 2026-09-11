@@ -216,14 +216,25 @@ private:
     // recording. A page never carries both flags (stageUnpin requires bound, pinStaged pages
     // are not bound yet), so one entry per staged page is exact. Cleared with staged_, and
     // like staged_ it survives a failed submission - see A-5 in flush().
-    std::vector<size_t>             stagedPages_;
+    // 연속 페이지 구간. stagePin/stageUnpin 이 런 단위로 넣으므로 항목 수가 페이지 수의
+    // 1/16 수준으로 줄고(4 KiB 페이지 · 256 토큰 granule 기준 7,168 -> 448), flush 의
+    // 집계를 페이지당이 아니라 런당 한 번으로 끌어올릴 수 있다.
+    //
+    // 페이지 **상태**(bound/pinStaged/...)는 여전히 페이지당이다 - 그건 줄일 수 없다.
+    // 줄어드는 것은 벡터 push 와 집계 분기다.
+    struct PageRun { size_t first = 0; size_t count = 0; bool unbind = false; };
+
+    // 런 목록에서 페이지 하나를 뺀다. 런 중간이면 둘로 쪼갠다.
+    static void removePageFromRuns(std::vector<PageRun>&, size_t page);
+
+    std::vector<PageRun>            stagedRuns_;
     // Page indices whose unbind reached the queue and whose memory is therefore reclaimable
     // at the next idle point. waitIdle() used to find them by scanning all of pages_, which
     // is the same O(reservation) shape flush() had: 6.2 ms on a 14 GiB arena to reclaim one
     // page. stageUnpin skips pages already unbindSubmitted and stagePin skips bound pages
     // (unbindSubmitted implies bound), so a page cannot be added twice and cannot leave the
     // set except through waitIdle(), which clears it wholesale.
-    std::vector<size_t>             unbindSubmittedPages_;
+    std::vector<PageRun>            unbindSubmittedRuns_;
     Stats                           stats_{};
 };
 

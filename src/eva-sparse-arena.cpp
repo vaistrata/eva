@@ -289,6 +289,28 @@ Region SparseArena::reserve(VkDeviceSize bytes)
     return Region{base, size};
 }
 
+void SparseArena::removePageFromRuns(std::vector<PageRun>& runs, size_t page)
+{
+    for (size_t k = 0; k < runs.size(); ++k)
+    {
+        PageRun& r = runs[k];
+        if (page < r.first || page >= r.first + r.count) continue;
+
+        if (r.count == 1)                  { runs.erase(runs.begin() + long(k)); return; }
+        if (page == r.first)               { ++r.first; --r.count;               return; }
+        if (page == r.first + r.count - 1) { --r.count;                          return; }
+
+        // 중간이다. 앞쪽을 줄이고 뒤쪽을 새 런으로 끼운다. insert 가 r 을 무효화할 수
+        // 있으므로 필요한 값을 먼저 다 뽑아 둔다.
+        const size_t tailFirst = page + 1;
+        const size_t tailCount = r.first + r.count - tailFirst;
+        const bool   unbind    = r.unbind;
+        r.count = page - r.first;
+        runs.insert(runs.begin() + long(k) + 1, PageRun{tailFirst, tailCount, unbind});
+        return;
+    }
+}
+
 MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -333,13 +355,8 @@ MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
                 }
             }
             // The page now carries neither flag, so it must leave the staged index too or
-            // flush() would commit a pin that was never staged.
-            for (size_t k = 0; k < stagedPages_.size(); ++k)
-                if (stagedPages_[k] == i)
-                {
-                    stagedPages_.erase(stagedPages_.begin() + long(k));
-                    break;
-                }
+            // flush() would commit a pin that was never staged. 런 중간이면 쪼개진다.
+            removePageFromRuns(stagedRuns_, i);
             p.unbindStaged = false;
             ++i;
             continue;                      // still bound; nothing new to allocate
@@ -389,8 +406,8 @@ MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
                              : pageSize_;
                 if (run.mapped) q.mem.mapped = run.mapped + VkDeviceSize(k) * pageSize_;
                 q.pinStaged = true;
-                stagedPages_.push_back(i + k);
             }
+            stagedRuns_.push_back(PageRun{i, runLen, false});
             landed = run.tier;
             staged_.push_back(IBindBackend::Bind{
                 sh.buffer, addr % shardSize_,
@@ -420,7 +437,7 @@ MemoryTier SparseArena::stagePin(Region r, MemoryTier preferred)
             staged_.push_back(IBindBackend::Bind{
                 sh2.buffer, a2 % shardSize_, pageSize_, q.mem.memory, q.mem.offset});
             q.pinStaged = true;
-            stagedPages_.push_back(k);
+            stagedRuns_.push_back(PageRun{k, 1, false});
         }
         i = j;
     }
@@ -435,18 +452,27 @@ void SparseArena::stageUnpin(Region r)
     const size_t first = size_t(r.base / pageSize_);
     const size_t last  = size_t((r.base + r.size + pageSize_ - 1) / pageSize_);
 
+    // 자격 있는 페이지가 이어지는 구간을 하나의 런으로 모은다. 자격 없는 페이지
+    // (이미 떼였거나 안 붙어 있는)를 만나면 런을 끊는다.
+    size_t runStart = 0, runLen = 0;
+    auto closeRun = [&]() {
+        if (runLen) { stagedRuns_.push_back(PageRun{runStart, runLen, true}); runLen = 0; }
+    };
+
     for (size_t i = first; i < last && i < pages_.size(); ++i)
     {
         Page& p = pages_[i];
-        if (!p.bound || p.unbindStaged || p.unbindSubmitted) continue;
+        if (!p.bound || p.unbindStaged || p.unbindSubmitted) { closeRun(); continue; }
 
         const VAddr addr = i * pageSize_;
         const Shard& sh  = shards_[size_t(addr / shardSize_)];
         staged_.push_back(IBindBackend::Bind{
             sh.buffer, addr % shardSize_, pageSize_, VK_NULL_HANDLE, 0});
         p.unbindStaged = true;
-        stagedPages_.push_back(i);
+        if (!runLen) runStart = i;
+        ++runLen;
     }
+    closeRun();
 }
 
 VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
@@ -468,7 +494,8 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
     // 자원 오프셋과 메모리 오프셋이 **둘 다** 이어져야 합칠 수 있다 - 메모리가 끊기면
     // 한 항목으로 쓸 수 없다.
     const size_t _staged = staged_.size();
-    const size_t _pages  = stagedPages_.size();
+    size_t _pages = 0;
+    for (const PageRun& _r : stagedRuns_) _pages += _r.count;
     size_t _merged = 0;
     if (staged_.size() > 1)
     {
@@ -512,25 +539,28 @@ VkResult SparseArena::flush(VkSemaphore wait, uint64_t waitValue,
     //
     // waitIdle() clears bound and unbindSubmitted together, leaving the predicate false
     // either way, so it does not participate.
-    for (const size_t i : stagedPages_)
+    // 집계는 런당 한 번으로 뺀다. 페이지당 남는 것은 플래그 두 개를 보고 쓰는 것뿐이다.
+    uint64_t nBound = 0, nUnbound = 0;
+    for (const PageRun& run : stagedRuns_)
     {
-        Page& p = pages_[i];
-        if (p.pinStaged)
+        const size_t end = run.first + run.count;
+        for (size_t i = run.first; i < end && i < pages_.size(); ++i)
         {
-            p.bound = true;  p.pinStaged = false;
-            ++stats_.pagesBound;
-            ++stats_.residentPages;
+            Page& p = pages_[i];
+            if (p.pinStaged)    { p.bound = true; p.pinStaged = false;              ++nBound;   }
+            if (p.unbindStaged) { p.unbindStaged = false; p.unbindSubmitted = true; ++nUnbound; }
         }
-        if (p.unbindStaged)
-        {
-            p.unbindStaged = false;  p.unbindSubmitted = true;
-            unbindSubmittedPages_.push_back(i);
-            ++stats_.pagesUnbound;
-            if (stats_.residentPages) --stats_.residentPages;
-        }
+        // 런 전체를 회수 목록에 넣는다. 전이하지 않은 페이지가 섞여 있어도 아래 회수
+        // 루프의 `!p.unbindSubmitted` 가드가 건너뛴다 - 기존 방어를 그대로 남긴다.
+        if (run.unbind) unbindSubmittedRuns_.push_back(run);
     }
+    stats_.pagesBound    += nBound;
+    stats_.residentPages += nBound;
+    stats_.pagesUnbound  += nUnbound;
+    stats_.residentPages -= std::min<uint64_t>(stats_.residentPages, nUnbound);
+
     staged_.clear();
-    stagedPages_.clear();
+    stagedRuns_.clear();
     ++stats_.bindSubmissions;
 
     if (cfg_.logLevel >= 2)
@@ -571,21 +601,25 @@ VkResult SparseArena::waitIdle()
     std::lock_guard<std::mutex> lock(mutex_);
     // A-2. Only pages whose unbind actually reached the queue may have their memory
     // returned. Reclaiming on unbindStaged instead would hand the allocator memory the GPU
-    // can still reach through a binding that was never removed. unbindSubmittedPages_ is
+    // can still reach through a binding that was never removed. unbindSubmittedRuns_ is
     // exactly that set, so this no longer walks the whole reservation to find it.
     //
     // The backend wait above happens before the lock and before any free, which is what makes
     // reclaiming safe: the queue has drained, so no binding still points at this memory.
-    for (const size_t i : unbindSubmittedPages_)
+    for (const PageRun& run : unbindSubmittedRuns_)
     {
-        Page& p = pages_[i];
-        if (!p.unbindSubmitted) continue;      // defensive; the set should not contain others
-        if (p.mem.valid()) alloc_->free(p.mem);
-        p.mem             = DeviceAllocator::Suballocation{};
-        p.bound           = false;
-        p.unbindSubmitted = false;
+        const size_t end = run.first + run.count;
+        for (size_t i = run.first; i < end && i < pages_.size(); ++i)
+        {
+            Page& p = pages_[i];
+            if (!p.unbindSubmitted) continue;  // defensive; the set should not contain others
+            if (p.mem.valid()) alloc_->free(p.mem);
+            p.mem             = DeviceAllocator::Suballocation{};
+            p.bound           = false;
+            p.unbindSubmitted = false;
+        }
     }
-    unbindSubmittedPages_.clear();
+    unbindSubmittedRuns_.clear();
     return r;
 }
 
