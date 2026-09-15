@@ -2109,6 +2109,18 @@ uint32_t Device::minStorageBufferOffsetAlignment() const
     return impl().minStorageBufferOffsetAlignment;
 }
 
+bool Device::sparseNonResidentStrict() const
+{
+    return impl().memTopo.nonResidentStrict();
+}
+
+void Device::deviceMemoryBudget(uint64_t* budget, uint64_t* used) const
+{
+    const MemoryTopology::Budget b = impl().memTopo.budgetFor(MemoryTier::Device);
+    if (budget) *budget = b.budget;
+    if (used)   *used   = b.used;
+}
+
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // Queue

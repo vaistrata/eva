@@ -381,6 +381,22 @@ public:
     // bytes (VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment).
     uint32_t minStorageBufferOffsetAlignment() const;
 
+    // True when reads of UNBOUND sparse pages return zero instead of undefined data
+    // (VkPhysicalDeviceSparseProperties.residencyNonResidentStrict). The engine path needs
+    // this because a residency negative control is only decidable where it holds: elsewhere
+    // an unbound read may return anything, including the bytes that were there before, so a
+    // test that asserts zeros would be asserting the driver's mood. Measured, never assumed -
+    // yes on the NVIDIA proprietary driver, no on lavapipe.
+    bool sparseNonResidentStrict() const;
+
+    // The driver's live view of the device-local heap, in bytes. Not the allocator's - that
+    // is memoryUsage(). Callers that size a KV cache or a weight window need this one:
+    // sparse pages can only come from plain device-local VRAM (sparseMemoryTypeBits is a far
+    // narrower set than an ordinary buffer's), so pinning cannot demote when the heap is
+    // tight - it simply fails. Asking first is the difference between a sized-down run and a
+    // pin failure halfway through a prefill.
+    void deviceMemoryBudget(uint64_t* budget, uint64_t* used) const;
+
     // Timestamp Query Pool
     bool supportsTimestampQueries() const;
     QueryPool createTimestampQueryPool(uint32_t queryCount);
