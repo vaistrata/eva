@@ -599,6 +599,7 @@ enum class DEVICE_TYPE : uint32_t {
 enum class Architecture : uint32_t {
     NONE = 0,
     // NVIDIA
+    NVIDIA_PRE_TURING   = (VENDOR_ID::NVIDIA << 16) | 0x0000,
     NVIDIA_TURING       = (VENDOR_ID::NVIDIA << 16) | 0x0001,
     NVIDIA_POST_TURING  = (VENDOR_ID::NVIDIA << 16) | 0x0002,
 
