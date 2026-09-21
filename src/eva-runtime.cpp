@@ -278,6 +278,7 @@ struct Device::Impl {
         bool graphicsPipelineLibrary = false;
 
         bool shaderFloat16 = false;
+        bool shaderInt8 = false;
         bool storageBuffer16BitAccess = false;
         bool shaderBufferFloat32AtomicAdd = false;
 
@@ -286,6 +287,7 @@ struct Device::Impl {
         bool vulkanMemoryModelDeviceScope = false;
         bool maintenance4 = false;
         bool subgroupSizeControl = false;
+        bool shaderIntegerDotProduct = false;
 
         bool hostQueryReset = false;
         bool timelineSemaphore = false;
@@ -343,6 +345,7 @@ struct Device::Impl {
     uint32_t minSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.minSubgroupSize
     uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
     bool subgroupArithmetic = false;   // ARITHMETIC op class usable from compute shaders
+    bool signedDp4a = false;           // VkPhysicalDeviceShaderIntegerDotProductProperties.integerDotProduct4x8BitPackedSignedAccelerated
 
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
@@ -969,6 +972,7 @@ struct ArchFingerprint
     uint32_t wavefrontsPerSimd;   // AMD shader core
     bool mixedDp4a;               // packed 4x8 mixed-signedness dot accelerated
     bool signedDp4a;              // packed 4x8 signed dot accelerated
+    bool coopmat;                 // VK_KHR_cooperative_matrix exposed
 };
 
 // Architecture from Vulkan feature fingerprints, not device-id tables — new
@@ -987,6 +991,9 @@ static Architecture detectArchitecture(const ArchFingerprint& fp)
             return Architecture::AMD_RDNA2;
         }
     }
+    // No cooperative matrix means no tensor cores (Pascal and older, which also have 64 warps/SM).
+    else if (fp.vendorID == VENDOR_ID::NVIDIA && !fp.coopmat)
+        return Architecture::NVIDIA_PRE_TURING;
     else if (fp.vendorID == VENDOR_ID::NVIDIA && fp.warpsPerSM != 0)
     {
         return fp.warpsPerSM == 32u ? Architecture::NVIDIA_TURING
@@ -1140,6 +1147,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     // Provided by VK_VERSION_1_3 (required for ComputePipelineCreateInfo::requiredSubgroupSize)
     auto& qSubgroupSizeCtrl = queryChain.add(VkPhysicalDeviceSubgroupSizeControlFeatures{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
+    });
+
+    // Provided by VK_VERSION_1_3 (GL_EXT_integer_dot_product)
+    auto& qIntDot = queryChain.add(VkPhysicalDeviceShaderIntegerDotProductFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
     });
 
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
@@ -1327,13 +1339,25 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     }
 
     // Provided by VK_VERSION_1_2
-    if (qFloat16Int8.shaderFloat16)
+    if (qFloat16Int8.shaderFloat16 || qFloat16Int8.shaderInt8)
     {
         chain.add(VkPhysicalDeviceShaderFloat16Int8Features{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
-            .shaderFloat16 = VK_TRUE,
+            .shaderFloat16 = qFloat16Int8.shaderFloat16,
+            .shaderInt8 = qFloat16Int8.shaderInt8,
         });
-        enabledFeatures.shaderFloat16 = true;
+        enabledFeatures.shaderFloat16 = bool(qFloat16Int8.shaderFloat16);
+        enabledFeatures.shaderInt8 = bool(qFloat16Int8.shaderInt8);
+    }
+
+    // Provided by VK_VERSION_1_3 (GL_EXT_integer_dot_product)
+    if (qIntDot.shaderIntegerDotProduct)
+    {
+        chain.add(VkPhysicalDeviceShaderIntegerDotProductFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+            .shaderIntegerDotProduct = VK_TRUE,
+        });
+        enabledFeatures.shaderIntegerDotProduct = true;
     }
 
     // Provided by VK_VERSION_1_1
@@ -1700,6 +1724,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->deviceType = (DEVICE_TYPE) props2.properties.deviceType;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
+        pImpl->signedDp4a = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated);
 
         pImpl->architecture = detectArchitecture({
             .vendorID          = pImpl->vendorID,
@@ -1708,7 +1733,8 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .warpsPerSM        = hasSmBuiltins ? smBuiltinsProps.shaderWarpsPerSM : 0,
             .wavefrontsPerSimd = hasAmdShaderCoreProps ? amdShaderCoreProps.wavefrontsPerSimd : 0,
             .mixedDp4a         = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated),
-            .signedDp4a        = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated),
+            .signedDp4a        = pImpl->signedDp4a,
+            .coopmat           = qCoopMat != nullptr,
         });
 
         // Arithmetic ops are only usable where the compute stage is one of the
@@ -1994,6 +2020,21 @@ uint32_t Device::maxSubgroupSize() const
 bool Device::supportsSubgroupArithmetic() const
 {
     return impl().subgroupArithmetic;
+}
+
+bool Device::supportsShaderInt8() const
+{
+    return impl().features.shaderInt8;
+}
+
+bool Device::supportsIntegerDotProduct() const
+{
+    return impl().features.shaderIntegerDotProduct;
+}
+
+bool Device::integerDot4x8SignedAccelerated() const
+{
+    return impl().signedDp4a;
 }
 
 uint32_t Device::vendorID() const

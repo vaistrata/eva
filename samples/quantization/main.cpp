@@ -213,6 +213,24 @@ void matmulINT8Packed(Buffer A_packed, Buffer BT_packed, Buffer C,
     .end().submit().wait();
 }
 
+void matmulINT8Dot(Buffer A_packed, Buffer BT_packed, Buffer C,
+                   uint32_t M, uint32_t N, uint32_t K4)
+{
+    ComputePipeline pipeline = getPipeline(SHADER_SPV("matmul-int8-dot"));
+    DescriptorSet descSet = descPool(pipeline.layout().descSetLayout(0));
+    descSet.write({C, A_packed, BT_packed});
+
+    struct Params { uint32_t M, N, K4; } params { M, N, K4 };
+
+    device.newCommandBuffer(QueueType::queue_compute)
+    .begin(COMMAND_BUFFER_USAGE::ONE_TIME_SUBMIT)
+        .bindPipeline(pipeline)
+        .setPushConstants(0, sizeof(params), &params)
+        .bindDescSets({descSet})
+        .dispatch2(M, N)
+    .end().submit().wait();
+}
+
 void convertToFP16Packed(Buffer fpBuf, Buffer packedBuf, uint32_t numElements)
 {
     ComputePipeline pipeline = getPipeline(SHADER_SPV("convert-fp16-pack"));
@@ -414,7 +432,12 @@ int main()
     uploadBuffer(staging, B_fp32, bData.data(), K * N * sizeof(float));
 
     printf("=== Quantized MatMul Demo ===\n");
-    printf("Matrix size: %u x %u x %u\n\n", M, K, N);
+    printf("Matrix size: %u x %u x %u\n", M, K, N);
+    const bool int8Capable = device.supportsShaderInt8() && device.supportsIntegerDotProduct()
+                          && device.integerDot4x8SignedAccelerated();
+    printf("int8 gate: shaderInt8 %d, integerDotProduct %d, dp4a signed accelerated %d -> %d\n\n",
+           int(device.supportsShaderInt8()), int(device.supportsIntegerDotProduct()),
+           int(device.integerDot4x8SignedAccelerated()), int(int8Capable));
 
     std::vector<float> refResult(M * N), unpackedResult(M * N), packedResult(M * N);
     std::vector<float> fp16PackedResult(M * N), fp16NativeResult(M * N), bf16PackedResult(M * N);
@@ -484,6 +507,24 @@ int main()
         }
     }
     downloadBuffer(staging, C_deq, packedResult.data(), M * N * sizeof(float));
+
+    // ===================================================================
+    // Group 3b: INT8 Packed via dotPacked4x8EXT (same operands as [3], so C_int must match bit for bit)
+    // ===================================================================
+    printf("\n--- [3b] INT8 Packed + dotPacked4x8EXT ---\n");
+    if (!int8Capable)
+        printf("  skipped: no accelerated integer dot product\n");
+    else
+    {
+        std::vector<int32_t> packedInt(M * N), dotInt(M * N);
+        downloadBuffer(staging, C_int, packedInt.data(), M * N * sizeof(int32_t));
+        {
+            TimeChecker timer("  matmul");
+            matmulINT8Dot(A_packed, BT_packed, C_int, M, N, K4);
+        }
+        downloadBuffer(staging, C_int, dotInt.data(), M * N * sizeof(int32_t));
+        printf("  int32 result vs [3]: %s\n", packedInt == dotInt ? "bit-identical" : "MISMATCH");
+    }
 
     // ===================================================================
     // Group 4: FP16 Packed (2x fp16 in uint32)

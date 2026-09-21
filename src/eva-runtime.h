@@ -341,6 +341,13 @@ public:
     // True if compute shaders may use the subgroup arithmetic ops
     // (subgroupAdd / Mul / Min / Max and their variants).
     bool supportsSubgroupArithmetic() const;
+    // True if the shaderInt8 feature was enabled (8-bit integer types in shaders).
+    bool supportsShaderInt8() const;
+    // True if the shaderIntegerDotProduct feature was enabled (dotPacked4x8EXT & co.).
+    bool supportsIntegerDotProduct() const;
+    // True if packed 4x8-bit signed dot products are hardware accelerated
+    // (VkPhysicalDeviceShaderIntegerDotProductProperties); false means emulated.
+    bool integerDot4x8SignedAccelerated() const;
     // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
     uint32_t vendorID() const;
     uint32_t deviceID() const;

@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+
+layout(local_size_x = 32, local_size_y = 32) in;
+
+// matmul-int8-packed.comp with dot4() replaced by dotPacked4x8EXT (OpSDotKHR).
+layout(set = 0, binding = 0) buffer OutBuffer { int  C[]; };
+layout(set = 0, binding = 1) buffer InBuffer  { uint A_packed[]; };
+layout(set = 0, binding = 2) buffer Weight    { uint BT_packed[]; };
+
+layout(push_constant) uniform PushConstants {
+    int M;
+    int N;
+    int K4;  // K / 4
+};
+
+void main()
+{
+    int n = int(gl_GlobalInvocationID.x);
+    int m = int(gl_GlobalInvocationID.y);
+
+    if (m >= M || n >= N)
+        return;
+
+    int sum = 0;
+    for (int j = 0; j < K4; ++j)
+        sum += dotPacked4x8EXT(int(A_packed[m * K4 + j]), int(BT_packed[n * K4 + j]));
+
+    C[m * N + n] = sum;
+}
