@@ -329,8 +329,9 @@ public:
     bool supportsCooperativeMatrix() const;
     // Every cooperative-matrix shape reported by the device (all type combos).
     const std::vector<CooperativeMatrixProperties>& cooperativeMatrixProperties() const;
-    // True if VK_EXT_pipeline_robustness is enabled
-    // (ComputePipelineCreateInfo::robustBufferAccess is usable).
+    // True if ComputePipelineCreateInfo::robustBufferAccess is usable: through
+    // VK_EXT_pipeline_robustness, or, without that extension, through the core
+    // robustBufferAccess feature enabled for the whole device.
     bool supportsPipelineRobustness() const;
     // Device subgroup size (VkPhysicalDeviceSubgroupProperties.subgroupSize).
     uint32_t subgroupSize() const;

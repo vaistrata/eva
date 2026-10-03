@@ -294,6 +294,7 @@ struct Device::Impl {
         bool synchronization2 = false;
         bool nullDescriptor = false;
         bool pipelineRobustness = false;
+        bool robustBufferAccess = false;      // core feature, device-wide; set when the extension is absent
         bool graphicsPipelineLibrary = false;
 
         bool shaderFloat16 = false;
@@ -1199,7 +1200,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     PNextChain chain;
     Device::Impl::Features enabledFeatures{};
 
-    chain.add(VkPhysicalDeviceFeatures2{
+    auto& features2 = chain.add(VkPhysicalDeviceFeatures2{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
     });
 
@@ -1268,6 +1269,15 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             });
             enabledFeatures.pipelineRobustness = true;
         }
+    }
+
+    // Without VK_EXT_pipeline_robustness (Vulkan SC has no such extension) the
+    // core feature gives the same guarantee to every pipeline of the device:
+    // an out-of-bounds read returns zero or a value from the bound buffer.
+    if (!enabledFeatures.pipelineRobustness && features2Query.features.robustBufferAccess)
+    {
+        features2.features.robustBufferAccess = VK_TRUE;
+        enabledFeatures.robustBufferAccess = true;
     }
 
     // Provided by VK_KHR_pipeline_executable_properties
@@ -1807,7 +1817,8 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         fprintf(stderr, "[eva-device] sync2=%d fp16=%d 16bit=%d coopmat=%d memModel=%d maint4=%d sgSizeCtrl=%d "
                         "robustness=%d hostQueryReset=%d timeline=%d\n",
                 f.synchronization2, f.shaderFloat16, f.storageBuffer16BitAccess, f.cooperativeMatrix,
-                f.vulkanMemoryModel, f.maintenance4, f.subgroupSizeControl, f.pipelineRobustness,
+                f.vulkanMemoryModel, f.maintenance4, f.subgroupSizeControl,
+                f.pipelineRobustness ? 1 : (f.robustBufferAccess ? 2 : 0),   // 1 per pipeline, 2 device-wide
                 f.hostQueryReset, f.timelineSemaphore);
         for (const char* ext : pImpl->enabledExtensions)
             fprintf(stderr, "[eva-device] ext %s\n", ext);
@@ -2046,7 +2057,7 @@ bool Device::supportsCooperativeMatrix() const
 
 bool Device::supportsPipelineRobustness() const
 {
-    return impl().features.pipelineRobustness;
+    return impl().features.pipelineRobustness || impl().features.robustBufferAccess;
 }
 
 const std::vector<Device::CooperativeMatrixProperties>& Device::cooperativeMatrixProperties() const
@@ -3484,8 +3495,9 @@ ComputePipeline Device::createComputePipeline(const ComputePipelineCreateInfo& i
 
     if (info.robustBufferAccess)
     {
-        EVA_ASSERT(impl().features.pipelineRobustness);
-        createInfo.pNext = &robustnessInfo;
+        EVA_ASSERT(impl().features.pipelineRobustness || impl().features.robustBufferAccess);
+        if (impl().features.pipelineRobustness)   // otherwise the device-wide core feature already covers it
+            createInfo.pNext = &robustnessInfo;
     }
 
     if (info.captureStatistics)
