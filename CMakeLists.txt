@@ -77,6 +77,7 @@ endif()
 add_library(eva STATIC
     src/eva-runtime.cpp
     src/eva-spirv-reflect.cpp
+    src/eva-vulkan-sc.cpp
 
     src/eva-runtime.h
     src/eva-enums.h
@@ -92,12 +93,24 @@ PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-# Link libraries
-target_link_libraries(eva
-PRIVATE
-    ${Vulkan_LIBRARIES}
-    spirv-reflect-static
-)
+# Link libraries.
+# EVA_VULKAN_SC_LOADER names the Vulkan SC loader (libvulkansc) to link instead
+# of the Vulkan one; eva then builds as a Vulkan SC application (eva-vulkan-sc.h).
+set(EVA_VULKAN_SC_LOADER "" CACHE FILEPATH "Vulkan SC loader library; empty builds for Vulkan")
+if(EVA_VULKAN_SC_LOADER)
+    target_compile_definitions(eva PUBLIC EVA_VULKAN_SC)
+    target_link_libraries(eva
+    PRIVATE
+        ${EVA_VULKAN_SC_LOADER}
+        spirv-reflect-static
+    )
+else()
+    target_link_libraries(eva
+    PRIVATE
+        ${Vulkan_LIBRARIES}
+        spirv-reflect-static
+    )
+endif()
 
 # Window support
 if(EVA_ENABLE_WINDOW)
@@ -126,6 +139,10 @@ endif()
 ################################################################################
 # Find glslangValidator
 set(EVA_GLSLC "${Vulkan_GLSLC_EXECUTABLE}" CACHE INTERNAL "Path to glslc compiler")
+
+# SPIR-V target of the shaders compiled through eva_auto_compile_shaders().
+# vulkan1.2 gives SPIR-V 1.5, the newest a Vulkan SC 1.0 device accepts.
+set(EVA_GLSLC_TARGET_ENV "vulkan1.3" CACHE STRING "glslc --target-env for compiled shaders")
 if(EVA_GLSLC)
     message(STATUS "[EVA] Found glslc: ${EVA_GLSLC}")
 else()
@@ -229,7 +246,7 @@ function(eva_compile_shaders)
 
         add_custom_command(
             OUTPUT ${SHADER_OUTPUT}
-            COMMAND ${EVA_GLSLC} --target-env=vulkan1.3 ${EVA_GLSLC_OPT_FLAGS} -MD -MF ${SHADER_OUTPUT}.d -o ${SHADER_OUTPUT} ${SHADER_SOURCE_ABS}
+            COMMAND ${EVA_GLSLC} --target-env=${EVA_GLSLC_TARGET_ENV} ${EVA_GLSLC_OPT_FLAGS} -MD -MF ${SHADER_OUTPUT}.d -o ${SHADER_OUTPUT} ${SHADER_SOURCE_ABS}
             DEPENDS ${SHADER_SOURCE_ABS}
             DEPFILE ${SHADER_OUTPUT}.d
             COMMENT "[EVA] Compiling shader: ${SHADER_NAME} -> ${SHADER_NAME}.spv"

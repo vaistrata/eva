@@ -24,6 +24,16 @@ void* createReflectShaderModule(const SpvBlob& spvBlob)
     return pModule;
 }
 
+const uint32_t* reflectedSpirv(const void* pModule)
+{
+    return spvReflectGetCode((const SpvReflectShaderModule*)pModule);
+}
+
+size_t reflectedSpirvSize(const void* pModule)
+{
+    return spvReflectGetCodeSize((const SpvReflectShaderModule*)pModule);
+}
+
 void destroyReflectShaderModule(void* pModule)
 {
     spvReflectDestroyShaderModule((SpvReflectShaderModule*)pModule);

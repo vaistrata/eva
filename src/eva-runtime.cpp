@@ -13,6 +13,7 @@
 #include <iostream> // std::cin (device selection)
 #include "eva-native-factory.h"
 #include "eva-runtime.h"
+#include "eva-vulkan-sc.h"
 
 // #define USE_DEBUG_PRINTF 1
 
@@ -67,6 +68,20 @@ void* createReflectShaderModule(const eva::SpvBlob& spvBlob);
 void destroyReflectShaderModule(void* pModule);
 eva::PipelineLayoutDesc extractPipelineLayoutDesc(const void* pModule);
 std::array<uint32_t, 3> extractWorkGroupSize(const void* pModule);
+const uint32_t* reflectedSpirv(const void* pModule);
+size_t reflectedSpirvSize(const void* pModule);
+
+#ifdef EVA_VULKAN_SC
+// The one read-only cache every pipeline comes from; created from the same
+// data pointer the device was told about, which is how SC matches the two.
+static VkPipelineCache scPipelineCache(VkDevice device)
+{
+    static VkPipelineCache cache = VK_NULL_HANDLE;
+    if (cache == VK_NULL_HANDLE)
+        ASSERT_SUCCESS(vkCreatePipelineCache(device, &eva::sc::assets().cacheInfo, nullptr, &cache));
+    return cache;
+}
+#endif
 
 eva::SpvBlob eva::SpvBlob::readFrom(const char* filepath)
 {
@@ -153,7 +168,11 @@ static VkInstance createVkInstance()
     VkApplicationInfo appInfo{
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "Vulkan App",
+#ifdef EVA_VULKAN_SC
+        .apiVersion = EVA_VKSC_API_VERSION_1_0
+#else
         .apiVersion = VK_API_VERSION_1_3
+#endif
     };
 
     VkValidationFeatureEnableEXT enables[] = {
@@ -1044,10 +1063,18 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto qfProps = arrayFrom(vkGetPhysicalDeviceQueueFamilyProperties, pd);
     
     auto supportedExtensions = arrayFrom(vkEnumerateDeviceExtensionProperties, pd, nullptr);
-    auto supportsExt = [&](const char* name) {
+    // A record run sees only what Vulkan SC defines (plus the layer's
+    // identifier query), so that it creates the pipelines the SC run will ask for.
+    const bool scRecording = sc::recordDir() != nullptr;
+    auto driverHasExt = [&](const char* name) {
         return std::any_of(supportedExtensions.begin(), supportedExtensions.end(), [&](const auto& ext) {
             return strcmp(name, ext.extensionName) == 0;
         });
+    };
+    auto supportsExt = [&](const char* name) {
+        if (scRecording && !sc::hasExtension(name) && strcmp(name, VK_EXT_PIPELINE_PROPERTIES_EXTENSION_NAME) != 0)
+            return false;
+        return driverHasExt(name);
     };
 
     // Query phase: populate all feature structs with a single vkGetPhysicalDeviceFeatures2 call
@@ -1295,7 +1322,12 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     }
 
     // Provided by VK_VERSION_1_3 (enables SPIR-V LocalSizeId / local_size_*_id)
-    if (qMaint4.maintenance4)
+#ifdef EVA_VULKAN_SC
+    const bool hasMaintenance4 = false;   // not in SC 1.0, a Vulkan 1.2 API, whatever the emulation passes through
+#else
+    const bool hasMaintenance4 = qMaint4.maintenance4 && !scRecording;
+#endif
+    if (hasMaintenance4)
     {
         chain.add(VkPhysicalDeviceMaintenance4Features{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES,
@@ -1568,6 +1600,27 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         );
     }
 
+#ifdef EVA_VULKAN_SC
+    // SC 1.0 is a Vulkan 1.2 API: what Vulkan 1.3 folded into core is still an
+    // extension here and has to be enabled by name.
+    if (enabledFeatures.synchronization2)
+        reqExtentions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    if (enabledFeatures.subgroupSizeControl)
+        reqExtentions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+
+    // Every object the run will create and the pipeline cache it will draw
+    // from are declared now; nothing is compiled or reserved after this.
+    chain.add(sc::assets().reservation);
+    chain.add(sc::PhysicalDeviceVulkanSC10Features{
+        .sType = sc::kStructureTypePhysicalDeviceVulkanSC10Features,
+    });
+#else
+    // Record run: the json_gen layer hands out pipeline identifiers through
+    // VK_EXT_pipeline_properties.
+    if (sc::recordDir() && supportsExt(VK_EXT_PIPELINE_PROPERTIES_EXTENSION_NAME))
+        reqExtentions.push_back(VK_EXT_PIPELINE_PROPERTIES_EXTENSION_NAME);
+#endif
+
     VkDeviceCreateInfo deviceCreateInfo{
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = &chain,
@@ -1578,6 +1631,9 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     };
     
     VkDevice vkDevice = create<VkDevice>(pd, deviceCreateInfo);
+#ifdef EVA_VULKAN_SC
+    sc::bindDevice(vkDevice);
+#endif
     
     std::vector<std::vector<Queue>> queues(qfProps.size());
     for (auto qfIndex : uniqueQfIndices) 
@@ -1651,9 +1707,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         VkPhysicalDeviceShaderCoreProperties2AMD amdCoreProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_2_AMD,
         };
-        const bool hasSmBuiltins = supportsExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
-        const bool hasAmdShaderCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME);
-        const bool hasAmdCoreProps = supportsExt(VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME);
+        // These describe the hardware (cores, wavefronts) and enable nothing, so
+        // a record run reads them too: its findings stand in for them on SC.
+        const bool hasSmBuiltins = driverHasExt(VK_NV_SHADER_SM_BUILTINS_EXTENSION_NAME);
+        const bool hasAmdShaderCoreProps = driverHasExt(VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME);
+        const bool hasAmdCoreProps = driverHasExt(VK_AMD_SHADER_CORE_PROPERTIES_2_EXTENSION_NAME);
         if (hasSmBuiltins)
         {
             smBuiltinsProps.pNext = props2.pNext;
@@ -1678,6 +1736,19 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->deviceType = (DEVICE_TYPE) props2.properties.deviceType;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
+
+#ifdef EVA_VULKAN_SC
+        // The emulation ICD reports itself (Khronos vendor, emulation driver)
+        // in place of the GPU it runs on. Kernels are tuned per vendor, so the
+        // identity the record run saw on that GPU is restored.
+        if (driverProps.driverID == sc::kDriverIdVulkanScEmulationOnVulkan)
+        {
+            const sc::DeviceIdentity& id = sc::recordedIdentity();
+            pImpl->vendorID = (decltype(pImpl->vendorID)) id.vendorID;
+            pImpl->deviceID = id.deviceID;
+            pImpl->driverID = (DRIVER_ID) id.driverID;
+        }
+#endif
 
         pImpl->architecture = detectArchitecture({
             .vendorID          = pImpl->vendorID,
@@ -1707,6 +1778,39 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             pImpl->coreClusterCount = amdCoreProps.activeComputeUnitCount;
         else if (pImpl->vendorID == VENDOR_ID::INTEL)
             pImpl->coreClusterCount = intelCoreClusterCount(pImpl->deviceID);
+
+#ifdef EVA_VULKAN_SC
+        // SC has none of the vendor extensions that report the architecture and
+        // the core count; the record run read them on this GPU.
+        pImpl->architecture = (decltype(pImpl->architecture)) sc::recordedIdentity().architecture;
+        pImpl->coreClusterCount = sc::recordedIdentity().coreClusterCount;
+#else
+        if (scRecording)
+            sc::recordIdentity({ props2.properties.vendorID, props2.properties.deviceID, (uint32_t) driverProps.driverID,
+                                 (uint32_t) pImpl->architecture, pImpl->coreClusterCount });
+#endif
+    }
+
+    // EVA_DEVICE_DUMP=1: what the device looks like to the application. A
+    // record run and its SC run must print the same lines.
+    if (std::getenv("EVA_DEVICE_DUMP"))
+    {
+        const auto& f = pImpl->features;
+        fprintf(stderr, "[eva-device] vendor=0x%04x device=0x%04x driver=%u arch=%d coreClusters=%u\n",
+                (unsigned)pImpl->vendorID, pImpl->deviceID, (unsigned)pImpl->driverID,
+                (int)pImpl->architecture, pImpl->coreClusterCount);
+        fprintf(stderr, "[eva-device] subgroup=%u (%u..%u) arithmetic=%d sharedMem=%u maxGroups=%u,%u,%u sboAlign=%u\n",
+                pImpl->subgroupSize, pImpl->minSubgroupSize, pImpl->maxSubgroupSize, (int)pImpl->subgroupArithmetic,
+                pImpl->maxComputeSharedMemorySize, pImpl->maxComputeWorkGroupCount[0],
+                pImpl->maxComputeWorkGroupCount[1], pImpl->maxComputeWorkGroupCount[2],
+                pImpl->minStorageBufferOffsetAlignment);
+        fprintf(stderr, "[eva-device] sync2=%d fp16=%d 16bit=%d coopmat=%d memModel=%d maint4=%d sgSizeCtrl=%d "
+                        "robustness=%d hostQueryReset=%d timeline=%d\n",
+                f.synchronization2, f.shaderFloat16, f.storageBuffer16BitAccess, f.cooperativeMatrix,
+                f.vulkanMemoryModel, f.maintenance4, f.subgroupSizeControl, f.pipelineRobustness,
+                f.hostQueryReset, f.timelineSemaphore);
+        for (const char* ext : pImpl->enabledExtensions)
+            fprintf(stderr, "[eva-device] ext %s\n", ext);
     }
 
     // Cache every cooperative-matrix shape the device reports.
@@ -2238,8 +2342,19 @@ CommandPool Device::createCommandPool(QueueType type, COMMAND_POOL_CREATE flags)
     uint32_t qfIndex = impl().qfIndex[type];
     EVA_ASSERT(qfIndex != uint32_t(-1));
 
+#ifdef EVA_VULKAN_SC
+    // An SC command pool is given its memory and its command buffer count up front.
+    const sc::CommandPoolMemoryReservationCreateInfo poolReservation{
+        .sType = sc::kStructureTypeCommandPoolMemoryReservationCreateInfo,
+        .commandPoolReservedSize = VkDeviceSize(64) << 20,
+        .commandPoolMaxCommandBuffers = sc::assets().reservation.commandBufferRequestCount,
+    };
+#endif
     auto vkHandle = create<VkCommandPool>(impl().vkDevice, {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+#ifdef EVA_VULKAN_SC
+        .pNext = &poolReservation,
+#endif
         .flags = (VkCommandPoolCreateFlags)(uint32_t)flags,
         .queueFamilyIndex = qfIndex,
     });
@@ -3380,11 +3495,56 @@ ComputePipeline Device::createComputePipeline(const ComputePipelineCreateInfo& i
                           | VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
     }
 
+    const uint64_t scKey = sc::pipelineKey(
+        reflectedSpirv(csModule.impl().pModule), reflectedSpirvSize(csModule.impl().pModule),
+        stageInfo.pSpecializationInfo, info.requiredSubgroupSize);
+
     VkPipeline vkHandle;
+#ifdef EVA_VULKAN_SC
+    // The pipeline was compiled offline: it is named by the identifier the
+    // record run gave it and drawn from the cache registered at device creation.
+    sc::PipelineOfflineCreateInfo offlineInfo{
+        .sType = sc::kStructureTypePipelineOfflineCreateInfo,
+        .pNext = createInfo.pNext,
+        .matchControl = 0,
+        .poolEntrySize = sc::kPipelinePoolEntrySize,
+    };
+    const sc::Uuid uuid = sc::pipelineUuid(scKey);
+    memcpy(offlineInfo.pipelineIdentifier, uuid.data(), uuid.size());
+    createInfo.pNext = &offlineInfo;
+    createInfo.stage.module = VK_NULL_HANDLE;
+
+    ASSERT_SUCCESS(vkCreateComputePipelines(
+        impl().vkDevice, scPipelineCache(impl().vkDevice),
+        1, &createInfo,
+        nullptr, &vkHandle));
+#else
     ASSERT_SUCCESS(vkCreateComputePipelines(
         impl().vkDevice, VK_NULL_HANDLE,
         1, &createInfo,
         nullptr, &vkHandle));
+
+    if (sc::recordDir())
+    {
+        static auto getPipelineProperties = (PFN_vkGetPipelinePropertiesEXT)
+            vkGetDeviceProcAddr(impl().vkDevice, "vkGetPipelinePropertiesEXT");
+        if (!getPipelineProperties)
+            throw std::runtime_error("EVA_SC_RECORD_DIR is set but VK_LAYER_KHRONOS_json_gen is not active.");
+
+        VkPipelineInfoEXT pipelineInfo{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_EXT,
+            .pipeline = vkHandle,
+        };
+        VkPipelinePropertiesIdentifierEXT identifier{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_PROPERTIES_IDENTIFIER_EXT,
+        };
+        ASSERT_SUCCESS(getPipelineProperties(impl().vkDevice, &pipelineInfo, (VkBaseOutStructure*)&identifier));
+
+        sc::Uuid uuid;
+        memcpy(uuid.data(), identifier.pipelineIdentifier, uuid.size());
+        sc::recordPipeline(scKey, uuid);
+    }
+#endif
 
     auto pImpl = new ComputePipeline::Impl(
         impl().vkDevice,
