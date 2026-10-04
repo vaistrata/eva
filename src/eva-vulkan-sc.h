@@ -62,6 +62,8 @@ constexpr VkStructureType kStructureTypeDeviceObjectReservationCreateInfo = (VkS
 constexpr VkStructureType kStructureTypeCommandPoolMemoryReservationCreateInfo = (VkStructureType)1000298003;
 constexpr VkStructureType kStructureTypePipelinePoolSize = (VkStructureType)1000298005;
 constexpr VkStructureType kStructureTypePipelineOfflineCreateInfo = (VkStructureType)1000298010;
+constexpr VkStructureType kStructureTypeFaultData = (VkStructureType)1000298007;
+constexpr VkStructureType kStructureTypeFaultCallbackInfo = (VkStructureType)1000298008;
 constexpr VkPipelineCacheCreateFlags kPipelineCacheReadOnly = 0x00000002u;
 constexpr VkPipelineCacheCreateFlags kPipelineCacheUseApplicationStorage = 0x00000004u;
 
@@ -138,6 +140,43 @@ struct PipelineOfflineCreateInfo {
     uint32_t        matchControl;      // VK_PIPELINE_MATCH_CONTROL_APPLICATION_UUID_EXACT_MATCH = 0
     VkDeviceSize    poolEntrySize;
 };
+
+// The fault a Vulkan SC implementation reports (VkFaultData): how severe, and
+// which kind. Level: 1 critical, 2 recoverable, 3 warning. Type: 2
+// implementation, 3 system, 4 physical device, 5 command buffer full,
+// 6 invalid API usage.
+struct FaultData {
+    VkStructureType sType;
+    void*           pNext;
+    uint32_t        faultLevel;
+    uint32_t        faultType;
+};
+
+using FaultCallbackFunction = void (VKAPI_PTR*)(VkBool32 unrecordedFaults, uint32_t faultCount, const FaultData* pFaults);
+
+struct FaultCallbackInfo {
+    VkStructureType       sType;
+    const void*           pNext;
+    uint32_t              faultCount;
+    FaultData*            pFaults;
+    FaultCallbackFunction pfnFaultCallback;
+};
+
+// A fault the implementation reported through the callback registered at
+// device creation, with the time it arrived (steady_clock, ms since the first
+// call of faultClockMs()).
+struct ReportedFault {
+    double   timeMs;
+    uint32_t level;
+    uint32_t type;
+};
+double faultClockMs();
+const FaultCallbackInfo& faultCallbackInfo();     // goes into the device's pNext chain
+std::vector<ReportedFault> reportedFaults();      // the faults received so far
+
+// EVA_SC_INJECT_FAULT=1: makes one call the implementation must reject (a
+// pipeline cache from data it was not told about) so that a fault is reported.
+void injectFaultIfRequested(VkDevice device);
 
 // Every pipeline takes an entry of this size from the one pool reserved at
 // device creation; it only has to cover the largest pipeline in the cache.

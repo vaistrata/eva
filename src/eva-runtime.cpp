@@ -1624,6 +1624,8 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     chain.add(sc::PhysicalDeviceVulkanSC10Features{
         .sType = sc::kStructureTypePhysicalDeviceVulkanSC10Features,
     });
+    // Faults the implementation detects are delivered to eva as they happen.
+    chain.add(sc::faultCallbackInfo());
 #else
     // Record run: the json_gen layer hands out pipeline identifiers through
     // VK_EXT_pipeline_properties.
@@ -1643,6 +1645,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     VkDevice vkDevice = create<VkDevice>(pd, deviceCreateInfo);
 #ifdef EVA_VULKAN_SC
     sc::bindDevice(vkDevice);
+    sc::injectFaultIfRequested(vkDevice);
 #endif
     
     std::vector<std::vector<Queue>> queues(qfProps.size());

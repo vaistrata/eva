@@ -1,10 +1,12 @@
 #include "eva-vulkan-sc.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -252,6 +254,71 @@ Uuid pipelineUuid(uint64_t key)
         std::abort();
     }
     return it->second;
+}
+
+double faultClockMs()
+{
+    static const auto origin = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - origin).count();
+}
+
+static std::mutex faultMutex;
+static std::vector<ReportedFault> faults;
+
+// Called by the implementation, on whichever thread made the offending call.
+static VKAPI_ATTR void VKAPI_CALL onFault(VkBool32 unrecordedFaults, uint32_t faultCount, const FaultData* pFaults)
+{
+    const double now = faultClockMs();
+    std::lock_guard<std::mutex> lock(faultMutex);
+    for (uint32_t i = 0; i < faultCount; ++i)
+    {
+        faults.push_back({ now, pFaults[i].faultLevel, pFaults[i].faultType });
+        fprintf(stderr, "[eva-sc-fault] t=%.3fms level=%u type=%u unrecorded=%u\n",
+                now, pFaults[i].faultLevel, pFaults[i].faultType, (unsigned)unrecordedFaults);
+    }
+}
+
+const FaultCallbackInfo& faultCallbackInfo()
+{
+    // The callback is handed each fault as it happens, so no storage is asked for.
+    static const FaultCallbackInfo info{
+        .sType = kStructureTypeFaultCallbackInfo,
+        .faultCount = 0,
+        .pFaults = nullptr,
+        .pfnFaultCallback = onFault,
+    };
+    return info;
+}
+
+std::vector<ReportedFault> reportedFaults()
+{
+    std::lock_guard<std::mutex> lock(faultMutex);
+    return faults;
+}
+
+void injectFaultIfRequested(VkDevice device)
+{
+    if (!std::getenv("EVA_SC_INJECT_FAULT"))
+        return;
+
+    // SC accepts a pipeline cache only from the data registered at device
+    // creation. This one is not: the call must fail and be reported as a fault.
+    static const uint8_t unknownData[32] = {};
+    const VkPipelineCacheCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+        .flags = kPipelineCacheReadOnly | kPipelineCacheUseApplicationStorage,
+        .initialDataSize = sizeof(unknownData),
+        .pInitialData = unknownData,
+    };
+    VkPipelineCache cache = VK_NULL_HANDLE;
+    const size_t before = reportedFaults().size();
+    const double injected = faultClockMs();
+    const VkResult result = vkCreatePipelineCache(device, &info, nullptr, &cache);
+    const double returned = faultClockMs();
+    const std::vector<ReportedFault> now = reportedFaults();
+    fprintf(stderr, "[eva-sc-fault] injected invalid vkCreatePipelineCache at t=%.3fms: VkResult=%d, returned at t=%.3fms, "
+                    "faults received through the callback: %zu\n",
+            injected, (int)result, returned, now.size() - before);
 }
 
 static PFN_vkQueueSubmit2KHR queueSubmit2 = nullptr;
