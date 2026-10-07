@@ -14,6 +14,7 @@
 #include "eva-native-factory.h"
 #include "eva-runtime.h"
 #include "eva-vulkan-sc.h"
+#include <atomic>
 
 // #define USE_DEBUG_PRINTF 1
 
@@ -2053,6 +2054,9 @@ std::vector<CommandBuffer> Device::newCommandBuffers(uint32_t count, QueueType t
     return impl().defaultCmdPool[type][(uint32_t)poolFlags].newCommandBuffers(count);
 }
 
+// Device::injectDeviceLost(); read by TimelineSemaphore::wait().
+static std::atomic<bool> deviceLostInjected{false};
+
 size_t Device::reportedFaultCount() const
 {
 #ifdef EVA_VULKAN_SC
@@ -2077,6 +2081,11 @@ void Device::injectFault() const
 #ifdef EVA_VULKAN_SC
     sc::injectFault(impl().vkDevice);
 #endif
+}
+
+void Device::injectDeviceLost() const
+{
+    deviceLostInjected.store(true);
 }
 
 bool Device::supportsCooperativeMatrix() const
@@ -3260,6 +3269,8 @@ uint64_t TimelineSemaphore::value() const
 
 Result TimelineSemaphore::wait(uint64_t value, uint64_t timeout) const
 {
+    if (deviceLostInjected.load(std::memory_order_relaxed))
+        return ERROR_DEVICE_LOST;
     VkSemaphoreWaitInfo waitInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
         .semaphoreCount = 1,

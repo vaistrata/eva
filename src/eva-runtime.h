@@ -328,6 +328,9 @@ public:
     // Test hook: makes one call the implementation must reject, so that a fault
     // is reported. Does nothing on a Vulkan build.
     void injectFault() const;
+    // Test hook: from now on every timeline wait returns ERROR_DEVICE_LOST at once,
+    // without waiting, as a driver does after it lost the device. Not undone.
+    void injectDeviceLost() const;
 
     // ----- Cooperative matrix capability (queried once at device creation) -----
     // Member order mirrors VkCooperativeMatrixPropertiesKHR (minus sType/pNext).
