@@ -315,6 +315,20 @@ public:
     PipelineLayout createPipelineLayout(PipelineLayoutDesc desc);
     DescriptorPool createDescriptorPool(const DescriptorPoolCreateInfo& info);
 
+    // ----- Faults the implementation reports (Vulkan SC fault callback) -----
+    // Level: 1 critical, 2 recoverable, 3 warning. Type: 2 implementation, 3 system,
+    // 4 physical device, 5 command buffer full, 6 invalid API usage.
+    // A Vulkan build has no such report: the count stays 0.
+    struct ReportedFault {
+        uint32_t level = 0;
+        uint32_t type = 0;
+    };
+    size_t reportedFaultCount() const;
+    ReportedFault lastReportedFault() const;
+    // Test hook: makes one call the implementation must reject, so that a fault
+    // is reported. Does nothing on a Vulkan build.
+    void injectFault() const;
+
     // ----- Cooperative matrix capability (queried once at device creation) -----
     // Member order mirrors VkCooperativeMatrixPropertiesKHR (minus sType/pNext).
     struct CooperativeMatrixProperties {

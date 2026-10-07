@@ -296,11 +296,26 @@ std::vector<ReportedFault> reportedFaults()
     return faults;
 }
 
+size_t reportedFaultCount()
+{
+    std::lock_guard<std::mutex> lock(faultMutex);
+    return faults.size();
+}
+
+ReportedFault lastReportedFault()
+{
+    std::lock_guard<std::mutex> lock(faultMutex);
+    return faults.empty() ? ReportedFault{} : faults.back();
+}
+
 void injectFaultIfRequested(VkDevice device)
 {
-    if (!std::getenv("EVA_SC_INJECT_FAULT"))
-        return;
+    if (std::getenv("EVA_SC_INJECT_FAULT"))
+        injectFault(device);
+}
 
+void injectFault(VkDevice device)
+{
     // SC accepts a pipeline cache only from the data registered at device
     // creation. This one is not: the call must fail and be reported as a fault.
     static const uint8_t unknownData[32] = {};

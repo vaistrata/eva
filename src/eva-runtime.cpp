@@ -2053,6 +2053,32 @@ std::vector<CommandBuffer> Device::newCommandBuffers(uint32_t count, QueueType t
     return impl().defaultCmdPool[type][(uint32_t)poolFlags].newCommandBuffers(count);
 }
 
+size_t Device::reportedFaultCount() const
+{
+#ifdef EVA_VULKAN_SC
+    return sc::reportedFaultCount();
+#else
+    return 0;
+#endif
+}
+
+Device::ReportedFault Device::lastReportedFault() const
+{
+#ifdef EVA_VULKAN_SC
+    const sc::ReportedFault fault = sc::lastReportedFault();
+    return { fault.level, fault.type };
+#else
+    return {};
+#endif
+}
+
+void Device::injectFault() const
+{
+#ifdef EVA_VULKAN_SC
+    sc::injectFault(impl().vkDevice);
+#endif
+}
+
 bool Device::supportsCooperativeMatrix() const
 {
     return impl().features.cooperativeMatrix;

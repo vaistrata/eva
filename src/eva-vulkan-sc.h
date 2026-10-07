@@ -173,10 +173,13 @@ struct ReportedFault {
 double faultClockMs();
 const FaultCallbackInfo& faultCallbackInfo();     // goes into the device's pNext chain
 std::vector<ReportedFault> reportedFaults();      // the faults received so far
+size_t reportedFaultCount();                      // their number, without the copy
+ReportedFault lastReportedFault();                // the latest one; zeros when none arrived
 
 // EVA_SC_INJECT_FAULT=1: makes one call the implementation must reject (a
 // pipeline cache from data it was not told about) so that a fault is reported.
 void injectFaultIfRequested(VkDevice device);
+void injectFault(VkDevice device);                // the same call, unconditionally
 
 // Every pipeline takes an entry of this size from the one pool reserved at
 // device creation; it only has to cover the largest pipeline in the cache.
