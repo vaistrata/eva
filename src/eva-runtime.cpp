@@ -288,6 +288,7 @@ struct Device::Impl {
 
         bool hostQueryReset = false;
         bool timelineSemaphore = false;
+        bool uniformBufferStandardLayout = false;
         bool pipelineExecutableInfo = false;
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
         bool performanceCounterQueryPools = false;
@@ -1082,6 +1083,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
     });
 
+    // Provided by VK_VERSION_1_2
+    auto& qUboStdLayout = queryChain.add(VkPhysicalDeviceUniformBufferStandardLayoutFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES,
+    });
+
     // Provided by VK_EXT_shader_atomic_float
     auto* qAtomicFloat = !supportsExt(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME)
         ? nullptr : &queryChain.add(VkPhysicalDeviceShaderAtomicFloatFeaturesEXT{
@@ -1352,6 +1358,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .timelineSemaphore = VK_TRUE,
         });
         enabledFeatures.timelineSemaphore = true;
+    }
+
+    // Provided by VK_VERSION_1_2
+    if (qUboStdLayout.uniformBufferStandardLayout)
+    {
+        chain.add(VkPhysicalDeviceUniformBufferStandardLayoutFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES,
+            .uniformBufferStandardLayout = VK_TRUE,
+        });
+        enabledFeatures.uniformBufferStandardLayout = true;
     }
 
 #ifdef EVA_ENABLE_PERFORMANCE_QUERY
