@@ -352,6 +352,12 @@ public:
     // Max workgroup count a dispatch may use, per grid axis
     // (VkPhysicalDeviceLimits.maxComputeWorkGroupCount).
     std::array<uint32_t, 3> maxComputeWorkGroupCount() const;
+    // Max compute workgroup size, per local axis (x, y, z)
+    // (VkPhysicalDeviceLimits.maxComputeWorkGroupSize).
+    std::array<uint32_t, 3> maxComputeWorkGroupSize() const;
+    // Max total compute shader invocations in one workgroup
+    // (VkPhysicalDeviceLimits.maxComputeWorkGroupInvocations).
+    uint32_t maxComputeWorkGroupInvocations() const;
     // Max total shared memory one workgroup may declare, in bytes
     // (VkPhysicalDeviceLimits.maxComputeSharedMemorySize).
     uint32_t maxComputeSharedMemorySize() const;
