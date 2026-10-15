@@ -283,6 +283,7 @@ struct Device::Impl {
 
         bool cooperativeMatrix = false;
         bool vulkanMemoryModel = false;
+        bool vulkanMemoryModelDeviceScope = false;
         bool maintenance4 = false;
         bool subgroupSizeControl = false;
 
@@ -1282,7 +1283,8 @@ Device Runtime::createDevice(const DeviceSettings& settings)
 
     // Provided by VK_KHR_cooperative_matrix.
     // The shader's GL_KHR_memory_scope_semantics requires the Vulkan memory
-    // model, so enable both together or neither.
+    // model, so enable both together or neither; Device-scope atomics then
+    // also need vulkanMemoryModelDeviceScope.
     if (qCoopMat && qCoopMat->cooperativeMatrix && qMemModel.vulkanMemoryModel)
     {
         reqExtentions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
@@ -1296,8 +1298,10 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         chain.add(VkPhysicalDeviceVulkanMemoryModelFeatures{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES,
             .vulkanMemoryModel = VK_TRUE,
+            .vulkanMemoryModelDeviceScope = qMemModel.vulkanMemoryModelDeviceScope,
         });
         enabledFeatures.vulkanMemoryModel = true;
+        enabledFeatures.vulkanMemoryModelDeviceScope = qMemModel.vulkanMemoryModelDeviceScope == VK_TRUE;
     }
 
     // Provided by VK_VERSION_1_3 (enables SPIR-V LocalSizeId / local_size_*_id)
