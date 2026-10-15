@@ -351,6 +351,8 @@ struct Device::Impl {
     Architecture architecture = Architecture::NONE;
     uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
     std::array<uint32_t, 3> maxComputeWorkGroupCount = {};   // VkPhysicalDeviceLimits.maxComputeWorkGroupCount
+    std::array<uint32_t, 3> maxComputeWorkGroupSize = {};    // VkPhysicalDeviceLimits.maxComputeWorkGroupSize
+    uint32_t maxComputeWorkGroupInvocations = 0;             // VkPhysicalDeviceLimits.maxComputeWorkGroupInvocations
     uint32_t maxComputeSharedMemorySize = 0;                 // VkPhysicalDeviceLimits.maxComputeSharedMemorySize
     uint32_t minStorageBufferOffsetAlignment = 1;            // VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment
 
@@ -1717,7 +1719,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
 
         const VkPhysicalDeviceLimits& limits = props2.properties.limits;
         for (uint32_t i = 0; i < pImpl->maxComputeWorkGroupCount.size(); ++i)
+        {
             pImpl->maxComputeWorkGroupCount[i] = limits.maxComputeWorkGroupCount[i];
+            pImpl->maxComputeWorkGroupSize[i] = limits.maxComputeWorkGroupSize[i];
+        }
+        pImpl->maxComputeWorkGroupInvocations = limits.maxComputeWorkGroupInvocations;
         pImpl->maxComputeSharedMemorySize = limits.maxComputeSharedMemorySize;
         pImpl->minStorageBufferOffsetAlignment = uint32_t(limits.minStorageBufferOffsetAlignment);
 
@@ -2023,6 +2029,16 @@ uint32_t Device::coreClusterCount() const
 std::array<uint32_t, 3> Device::maxComputeWorkGroupCount() const
 {
     return impl().maxComputeWorkGroupCount;
+}
+
+std::array<uint32_t, 3> Device::maxComputeWorkGroupSize() const
+{
+    return impl().maxComputeWorkGroupSize;
+}
+
+uint32_t Device::maxComputeWorkGroupInvocations() const
+{
+    return impl().maxComputeWorkGroupInvocations;
 }
 
 uint32_t Device::maxComputeSharedMemorySize() const
