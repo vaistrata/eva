@@ -62,6 +62,18 @@ std::vector<const char*> getRequiredInstanceExtensions()
 #endif
 }
 
+#ifndef VK_EXT_shader_float8
+#define VK_EXT_shader_float8 1
+#define VK_EXT_SHADER_FLOAT8_EXTENSION_NAME "VK_EXT_shader_float8"
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT ((VkStructureType)1000567000)
+struct VkPhysicalDeviceShaderFloat8FeaturesEXT
+{
+    VkStructureType sType;
+    void* pNext;
+    VkBool32 shaderFloat8;
+    VkBool32 shaderFloat8CooperativeMatrix;
+};
+#endif
 
 void* createReflectShaderModule(const eva::SpvBlob& spvBlob);
 void destroyReflectShaderModule(void* pModule);
@@ -988,6 +1000,7 @@ struct ArchFingerprint
     uint32_t wavefrontsPerSimd;   // AMD shader core
     bool mixedDp4a;               // packed 4x8 mixed-signedness dot accelerated
     bool signedDp4a;              // packed 4x8 signed dot accelerated
+    bool shaderFloat8;            // shaderFloat8 feature supported
 };
 
 // Architecture from Vulkan feature fingerprints, not device-id tables — new
@@ -1002,7 +1015,8 @@ static Architecture detectArchitecture(const ArchFingerprint& fp)
         if (fp.minSubgroupSize == 32u && fp.maxSubgroupSize == 64u)
         {
             if (fp.wavefrontsPerSimd == 20u)  return Architecture::AMD_RDNA1;
-            if (fp.mixedDp4a)                 return Architecture::AMD_POST_RDNA2;
+            if (fp.shaderFloat8)              return Architecture::AMD_RDNA4;
+            if (fp.mixedDp4a)                 return Architecture::AMD_RDNA3;
             return Architecture::AMD_RDNA2;
         }
     }
@@ -1089,6 +1103,12 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto& qFloat16Int8 = queryChain.add(VkPhysicalDeviceShaderFloat16Int8Features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES,
     });
+
+    // Provided by VK_EXT_shader_float8
+    auto* qFloat8 = !supportsExt(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME)
+        ? nullptr : &queryChain.add(VkPhysicalDeviceShaderFloat8FeaturesEXT{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
+        });
     
     // Provided by VK_VERSION_1_1
     auto& q16BitStorage = queryChain.add(VkPhysicalDevice16BitStorageFeatures{
@@ -1728,6 +1748,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .wavefrontsPerSimd = hasAmdShaderCoreProps ? amdShaderCoreProps.wavefrontsPerSimd : 0,
             .mixedDp4a         = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated),
             .signedDp4a        = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated),
+            .shaderFloat8      = qFloat8 && bool(qFloat8->shaderFloat8),
         });
 
         // Arithmetic ops are only usable where the compute stage is one of the

@@ -606,7 +606,8 @@ enum class Architecture : uint32_t {
     AMD_GCN             = (VENDOR_ID::AMD << 16) | 0x0000,
     AMD_RDNA1           = (VENDOR_ID::AMD << 16) | 0x0001,
     AMD_RDNA2           = (VENDOR_ID::AMD << 16) | 0x0002,
-    AMD_POST_RDNA2      = (VENDOR_ID::AMD << 16) | 0x0003,
+    AMD_RDNA3           = (VENDOR_ID::AMD << 16) | 0x0003,
+    AMD_RDNA4           = (VENDOR_ID::AMD << 16) | 0x0004,
 
     //INTEL
     INTEL_XE1           = (VENDOR_ID::INTEL << 16) | 0x0001,
