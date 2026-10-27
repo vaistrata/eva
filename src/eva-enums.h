@@ -611,6 +611,7 @@ enum class Architecture : uint32_t {
     //INTEL
     INTEL_XE1           = (VENDOR_ID::INTEL << 16) | 0x0001,
     INTEL_XE2           = (VENDOR_ID::INTEL << 16) | 0x0002,
+    INTEL_XE3           = (VENDOR_ID::INTEL << 16) | 0x0003,
 };
 
 enum class PRESENT_MODE : uint32_t {

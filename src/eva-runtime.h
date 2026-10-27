@@ -347,8 +347,8 @@ public:
     DEVICE_TYPE deviceType() const;
     DRIVER_ID driverID() const;
     Architecture architectureID() const;
-    // Shader core-cluster count (NVIDIA SM / AMD CU(instead of WGP) / Intel Xe-core); 0 when unknown.
-    uint32_t coreClusterCount() const;
+    // Compute-block count (NVIDIA SM / AMD CU(instead of WGP) / Intel Xe-core); 0 when unknown.
+    uint32_t computeBlockCount() const;
     // Max workgroup count a dispatch may use, per grid axis
     // (VkPhysicalDeviceLimits.maxComputeWorkGroupCount).
     std::array<uint32_t, 3> maxComputeWorkGroupCount() const;

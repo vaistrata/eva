@@ -349,7 +349,7 @@ struct Device::Impl {
     DEVICE_TYPE deviceType = DEVICE_TYPE::OTHER;  // VkPhysicalDeviceProperties.deviceType
     DRIVER_ID driverID = DRIVER_ID::MAX_ENUM;     // VkPhysicalDeviceDriverProperties.driverID
     Architecture architecture = Architecture::NONE;
-    uint32_t coreClusterCount = 0;                     // shader core clusters (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
+    uint32_t computeBlockCount = 0;                    // compute blocks (NV SM / AMD CU(instead of WGP) / Intel Xe-core); 0: unknown
     std::array<uint32_t, 3> maxComputeWorkGroupCount = {};   // VkPhysicalDeviceLimits.maxComputeWorkGroupCount
     std::array<uint32_t, 3> maxComputeWorkGroupSize = {};    // VkPhysicalDeviceLimits.maxComputeWorkGroupSize
     uint32_t maxComputeWorkGroupInvocations = 0;             // VkPhysicalDeviceLimits.maxComputeWorkGroupInvocations
@@ -938,23 +938,42 @@ struct PNextChain {
     }
 };
 
-// Intel Xe-core counts by PCI device id — Intel exposes no Vulkan query for
-// this. Ported from ggml-vulkan (ggml_vk_intel_shader_core_count); unlisted
-// devices (integrated Arc included) resolve to 0.
-static uint32_t intelCoreClusterCount(uint32_t deviceID)
+// Intel Xe-core counts by PCI device id: Intel exposes no Vulkan query for
+// this. From Intel's supported-hardware tables (dgpu-docs.intel.com/overview/
+// supported-hardware, "EU number"): 16 EUs per Xe-core on Xe-HPG, Xe-LPG and
+// Battlemage, 8 on Xe-HPC and Lunar Lake; Panther Lake lists Xe-cores. An id
+// shared by fused-down SKUs (Meteor Lake 0x7D55: 8 or 7) takes the larger.
+// Pre-Xe-core parts (Xe-LP and older) resolve to 0.
+static uint32_t intelComputeBlockCount(uint32_t deviceID)
 {
     switch (deviceID) {
-        case 0x56A6:                            return 6;    // A310
-        case 0x5693: case 0x56A5: case 0x56B1:  return 8;    // A370M / A380 / Pro A40/A50
-        case 0x5697:                            return 12;   // A530M
-        case 0x5692: case 0x56B3:               return 16;   // A550M / Pro A60
-        case 0x56A2:                            return 24;   // A580
-        case 0x5691: case 0x56A1:               return 28;   // A730M / A750
-        case 0x56A0: case 0x5690:               return 32;   // A770 / A770M
-        case 0xE212:                            return 16;   // Pro B50
-        case 0xE20C:                            return 18;   // B570
-        case 0xE20B: case 0xE211:               return 20;   // B580 / Pro B60
-        default:                                return 0;
+        // Alchemist (Xe-HPG), Arctic Sound-M
+        case 0x5694: case 0x56A6: case 0x56BB: case 0x56BD:     return 6;    // A350M / A310 / A310E / A350E
+        case 0x5693: case 0x56A5: case 0x56B0: case 0x56B1:
+        case 0x56BA: case 0x56BC: case 0x56C1:                  return 8;    // A370M / A380 / Pro A30M / Pro A40/A50 / A380E / A370E / Flex 140
+        case 0x5697:                                            return 12;   // A530M
+        case 0x5692: case 0x5696: case 0x56B2: case 0x56B3:     return 16;   // A550M / A570M / Pro A60M / Pro A60
+        case 0x5691: case 0x56A2:                               return 24;   // A730M / A580
+        case 0x56A1:                                            return 28;   // A750
+        case 0x5690: case 0x56A0: case 0x56C0:                  return 32;   // A770M / A770 / Flex 170
+        // Ponte Vecchio (Xe-HPC)
+        case 0x0BDA:                                            return 56;   // Max 1100
+        case 0x0BD5:                                            return 128;  // Max 1550
+        // Meteor Lake, Arrow Lake (Xe-LPG)
+        case 0x7D40: case 0x7D45: case 0x7D41: case 0x7D67:     return 4;    // MTL 64/48 EUs, ARL-U 64, ARL-S 64/48/32
+        case 0x7D55: case 0x7DD5: case 0x7D51:                  return 8;    // MTL 128/112 EUs, ARL-H 128/112
+        // Lunar Lake (Xe2)
+        case 0x64A0: case 0x6420:                               return 8;    // 64/56 EUs
+        // Battlemage (Xe2)
+        case 0xE212:                                            return 16;   // Pro B50
+        case 0xE20C:                                            return 18;   // B570
+        case 0xE20B: case 0xE211: case 0xE222:                  return 20;   // B580 / Pro B60 / Pro B65
+        case 0xE223:                                            return 32;   // Pro B70
+        // Panther Lake (Xe3)
+        case 0xB090: case 0xB0A0:                               return 4;    // Intel Graphics, 4/3/2 Xe-cores
+        case 0xB081: case 0xB083: case 0xB085: case 0xB087:     return 11;   // Arc B370, 11/10 Xe-cores
+        case 0xB080: case 0xB082: case 0xB084: case 0xB086:     return 12;   // Arc B390
+        default:                                                return 0;
     }
 }
 
@@ -1663,7 +1682,7 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .pNext = &integerDotProps,
         };
 
-        // Core-cluster count sources (selection order ported from ggml-vulkan).
+        // Compute-block count sources (selection order ported from ggml-vulkan).
         VkPhysicalDeviceShaderSMBuiltinsPropertiesNV smBuiltinsProps{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV,
         };
@@ -1728,11 +1747,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->minStorageBufferOffsetAlignment = uint32_t(limits.minStorageBufferOffsetAlignment);
 
         if (hasSmBuiltins)
-            pImpl->coreClusterCount = smBuiltinsProps.shaderSMCount;
+            pImpl->computeBlockCount = smBuiltinsProps.shaderSMCount;
         else if (hasAmdCoreProps)
-            pImpl->coreClusterCount = amdCoreProps.activeComputeUnitCount;
+            pImpl->computeBlockCount = amdCoreProps.activeComputeUnitCount;
         else if (pImpl->vendorID == VENDOR_ID::INTEL)
-            pImpl->coreClusterCount = intelCoreClusterCount(pImpl->deviceID);
+            pImpl->computeBlockCount = intelComputeBlockCount(pImpl->deviceID);
     }
 
     // Cache every cooperative-matrix shape the device reports.
@@ -2021,9 +2040,9 @@ Architecture Device::architectureID() const
     return impl().architecture;
 }
 
-uint32_t Device::coreClusterCount() const
+uint32_t Device::computeBlockCount() const
 {
-    return impl().coreClusterCount;
+    return impl().computeBlockCount;
 }
 
 std::array<uint32_t, 3> Device::maxComputeWorkGroupCount() const
