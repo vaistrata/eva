@@ -279,6 +279,7 @@ struct Device::Impl {
 
         bool shaderFloat16 = false;
         bool storageBuffer16BitAccess = false;
+        bool shaderSubgroupExtendedTypes = false;
         bool shaderBufferFloat32AtomicAdd = false;
 
         bool cooperativeMatrix = false;
@@ -1094,6 +1095,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto& q16BitStorage = queryChain.add(VkPhysicalDevice16BitStorageFeatures{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
     });
+
+    // Provided by VK_VERSION_1_2
+    auto& qSubgroupExtTypes = queryChain.add(VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES,
+    });
     
     // Provided by VK_VERSION_1_2
     auto& qHostReset = queryChain.add(VkPhysicalDeviceHostQueryResetFeatures{
@@ -1363,6 +1369,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .storageBuffer16BitAccess = VK_TRUE,
         });
         enabledFeatures.storageBuffer16BitAccess = true;
+    }
+
+    // Provided by VK_VERSION_1_2 (f16 / i8 / i16 / i64 operands of subgroup ops)
+    if (qSubgroupExtTypes.shaderSubgroupExtendedTypes)
+    {
+        chain.add(VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES,
+            .shaderSubgroupExtendedTypes = VK_TRUE,
+        });
+        enabledFeatures.shaderSubgroupExtendedTypes = true;
     }
 
     // Provided by VK_VERSION_1_2
@@ -2013,6 +2029,11 @@ uint32_t Device::maxSubgroupSize() const
 bool Device::supportsSubgroupArithmetic() const
 {
     return impl().subgroupArithmetic;
+}
+
+bool Device::supportsSubgroupExtendedTypes() const
+{
+    return impl().features.shaderSubgroupExtendedTypes;
 }
 
 uint32_t Device::vendorID() const

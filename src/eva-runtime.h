@@ -341,6 +341,9 @@ public:
     // True if compute shaders may use the subgroup arithmetic ops
     // (subgroupAdd / Mul / Min / Max and their variants).
     bool supportsSubgroupArithmetic() const;
+    // True if the shaderSubgroupExtendedTypes feature was enabled: subgroup ops
+    // may take f16 (and i8 / i16 / i64) operands.
+    bool supportsSubgroupExtendedTypes() const;
     // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
     uint32_t vendorID() const;
     uint32_t deviceID() const;
