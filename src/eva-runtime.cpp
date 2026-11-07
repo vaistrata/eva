@@ -280,6 +280,7 @@ struct Device::Impl {
         bool shaderFloat16 = false;
         bool storageBuffer16BitAccess = false;
         bool shaderSubgroupExtendedTypes = false;
+        bool shaderIntegerDotProduct = false;
         bool shaderBufferFloat32AtomicAdd = false;
 
         bool cooperativeMatrix = false;
@@ -344,6 +345,7 @@ struct Device::Impl {
     uint32_t minSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.minSubgroupSize
     uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
     bool subgroupArithmetic = false;   // ARITHMETIC op class usable from compute shaders
+    bool dot4x8PackedMixedAccelerated = false;   // VkPhysicalDeviceShaderIntegerDotProductProperties
 
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
@@ -1100,6 +1102,11 @@ Device Runtime::createDevice(const DeviceSettings& settings)
     auto& qSubgroupExtTypes = queryChain.add(VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES,
     });
+
+    // Provided by VK_VERSION_1_3
+    auto& qIntegerDot = queryChain.add(VkPhysicalDeviceShaderIntegerDotProductFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+    });
     
     // Provided by VK_VERSION_1_2
     auto& qHostReset = queryChain.add(VkPhysicalDeviceHostQueryResetFeatures{
@@ -1379,6 +1386,16 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .shaderSubgroupExtendedTypes = VK_TRUE,
         });
         enabledFeatures.shaderSubgroupExtendedTypes = true;
+    }
+
+    // Provided by VK_VERSION_1_3 (GL_EXT_integer_dot_product: dotEXT, dotPacked4x8EXT, ...)
+    if (qIntegerDot.shaderIntegerDotProduct)
+    {
+        chain.add(VkPhysicalDeviceShaderIntegerDotProductFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+            .shaderIntegerDotProduct = VK_TRUE,
+        });
+        enabledFeatures.shaderIntegerDotProduct = true;
     }
 
     // Provided by VK_VERSION_1_2
@@ -1735,6 +1752,8 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->deviceID = props2.properties.deviceID;
         pImpl->deviceType = (DEVICE_TYPE) props2.properties.deviceType;
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
+        pImpl->dot4x8PackedMixedAccelerated =
+            integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated == VK_TRUE;
 
         pImpl->architecture = detectArchitecture({
             .vendorID          = pImpl->vendorID,
@@ -2034,6 +2053,16 @@ bool Device::supportsSubgroupArithmetic() const
 bool Device::supportsSubgroupExtendedTypes() const
 {
     return impl().features.shaderSubgroupExtendedTypes;
+}
+
+bool Device::supportsIntegerDotProduct() const
+{
+    return impl().features.shaderIntegerDotProduct;
+}
+
+bool Device::isDot4x8PackedMixedAccelerated() const
+{
+    return impl().features.shaderIntegerDotProduct && impl().dot4x8PackedMixedAccelerated;
 }
 
 uint32_t Device::vendorID() const
