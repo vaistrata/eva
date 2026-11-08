@@ -344,6 +344,13 @@ public:
     // True if the shaderSubgroupExtendedTypes feature was enabled: subgroup ops
     // may take f16 (and i8 / i16 / i64) operands.
     bool supportsSubgroupExtendedTypes() const;
+    // True if the shaderIntegerDotProduct feature was enabled: shaders may use
+    // GL_EXT_integer_dot_product (dotEXT, dotPacked4x8EXT, ...).
+    bool supportsIntegerDotProduct() const;
+    // True if that feature is enabled and the device runs the packed 4x8
+    // mixed-signedness dot product (dotPacked4x8EXT(int, uint)) natively
+    // (integerDotProduct4x8BitPackedMixedSignednessAccelerated).
+    bool isDot4x8PackedMixedAccelerated() const;
     // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
     uint32_t vendorID() const;
     uint32_t deviceID() const;
