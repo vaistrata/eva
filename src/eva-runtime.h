@@ -351,6 +351,8 @@ public:
     DRIVER_ID driverID() const;
     Architecture architectureID() const;
     // Compute-block count (NVIDIA SM / AMD CU(instead of WGP) / Intel Xe-core); 0 when unknown.
+    // Intel never reads 0: a part the id table misses takes 8 Xe-cores.
+    // Intel's architecture comes from the same id table.
     uint32_t computeBlockCount() const;
     // Max workgroup count a dispatch may use, per grid axis
     // (VkPhysicalDeviceLimits.maxComputeWorkGroupCount).

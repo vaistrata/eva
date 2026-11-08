@@ -939,42 +939,83 @@ struct PNextChain {
     }
 };
 
-// Intel Xe-core counts by PCI device id: Intel exposes no Vulkan query for
-// this. From Intel's supported-hardware tables (dgpu-docs.intel.com/overview/
-// supported-hardware, "EU number"): 16 EUs per Xe-core on Xe-HPG, Xe-LPG and
-// Battlemage, 8 on Xe-HPC and Lunar Lake; Panther Lake lists Xe-cores. An id
-// shared by fused-down SKUs (Meteor Lake 0x7D55: 8 or 7) takes the larger.
-// Pre-Xe-core parts (Xe-LP and older) resolve to 0.
-static uint32_t intelComputeBlockCount(uint32_t deviceID)
+// Intel parts by PCI device id: Vulkan exposes neither the architecture nor
+// the Xe-core count. Ids follow Mesa's include/pci_ids/iris_pci_ids.h; Xe-core
+// counts the "EU number" column of Intel's supported-hardware tables,
+// dgpu-docs.intel.com/overview/supported-hardware/xe-driver-gpus.html (Xe2,
+// Xe3) and .../i915-driver-gpus.html (Xe-HPG, Xe-LPG): 16 EUs per Xe-core on
+// Xe-HPG, Xe-LPG and Battlemage, 8 on Lunar Lake; Panther Lake lists Xe-cores.
+// An id shared by fused-down SKUs (Meteor Lake 0x7D55: 8 or 7) takes the
+// larger; an id with no public SKU takes its die's count. 0 Xe-cores: unknown.
+// A part the table misses is INTEL_XE, Xe-LP and older, which is not tuned for.
+//
+// References:
+//   ids, platforms  gitlab.freedesktop.org/mesa/mesa/-/raw/main/include/pci_ids/iris_pci_ids.h
+//                   gitlab.freedesktop.org/mesa/mesa/-/raw/main/src/intel/dev/intel_device_info.c
+//   product names   pci-ids.ucw.cz/v2.2/pci.ids
+//   A750E, A580E    intel.com/content/www/us/en/products/sku/240447/intel-arc-a750e-graphics/specifications.html
+//                   intel.com/content/www/us/en/products/sku/240446/intel-arc-a580e-graphics/specifications.html
+//   DG2-G12 die     techpowerup.com/293642/intel-readies-third-dg2-alchemist-asic-with-256-eu
+//   BMG-G21/G31 die videocardz.com/newz/intel-confirms-flagship-arc-battlemage-bmg-g31-graphics-processor-with-32-xe2-cores
+//   Wildcat Lake    techpowerup.com/348285/intel-wildcat-lake-is-official-up-to-6-cpu-cores-and-2-xe3-cores
+//   0xB640          phoronix.com/news/Linux-6.13-Xe2-Ultra-Joiner-ARL
+//
+// References:
+//   ids, platforms  gitlab.freedesktop.org/mesa/mesa/-/raw/main/include/pci_ids/iris_pci_ids.h
+//                   gitlab.freedesktop.org/mesa/mesa/-/raw/main/src/intel/dev/intel_device_info.c
+//   product names   pci-ids.ucw.cz/v2.2/pci.ids
+//   A750E, A580E    intel.com/content/www/us/en/products/sku/240447/intel-arc-a750e-graphics/specifications.html
+//                   intel.com/content/www/us/en/products/sku/240446/intel-arc-a580e-graphics/specifications.html
+//   DG2-G12 die     techpowerup.com/293642/intel-readies-third-dg2-alchemist-asic-with-256-eu
+//   BMG-G21/G31 die videocardz.com/newz/intel-confirms-flagship-arc-battlemage-bmg-g31-graphics-processor-with-32-xe2-cores
+//   Wildcat Lake    techpowerup.com/348285/intel-wildcat-lake-is-official-up-to-6-cpu-cores-and-2-xe3-cores
+//   0xB640          phoronix.com/news/Linux-6.13-Xe2-Ultra-Joiner-ARL
+struct IntelPart
 {
+    Architecture architecture;
+    uint32_t xeCores;
+};
+
+static IntelPart intelPart(uint32_t deviceID)
+{
+    using A = Architecture;
     switch (deviceID) {
-        // Alchemist (Xe-HPG), Arctic Sound-M
-        case 0x5694: case 0x56A6: case 0x56BB: case 0x56BD:     return 6;    // A350M / A310 / A310E / A350E
+        // Alchemist, Arctic Sound-M (Xe-HPG)
+        case 0x5694: case 0x56A6: case 0x56BB: case 0x56BD:     return {A::INTEL_XE_HPG, 6};    // A350M / A310 / A310E / A350E
         case 0x5693: case 0x56A5: case 0x56B0: case 0x56B1:
-        case 0x56BA: case 0x56BC: case 0x56C1:                  return 8;    // A370M / A380 / Pro A30M / Pro A40/A50 / A380E / A370E / Flex 140
-        case 0x5697:                                            return 12;   // A530M
-        case 0x5692: case 0x5696: case 0x56B2: case 0x56B3:     return 16;   // A550M / A570M / Pro A60M / Pro A60
-        case 0x5691: case 0x56A2:                               return 24;   // A730M / A580
-        case 0x56A1:                                            return 28;   // A750
-        case 0x5690: case 0x56A0: case 0x56C0:                  return 32;   // A770M / A770 / Flex 170
-        // Ponte Vecchio (Xe-HPC)
-        case 0x0BDA:                                            return 56;   // Max 1100
-        case 0x0BD5:                                            return 128;  // Max 1550
+        case 0x56BA: case 0x56BC: case 0x56C1:                  return {A::INTEL_XE_HPG, 8};    // A370M / A380 / Pro A30M / Pro A40/A50 / A380E / A370E / Flex 140
+        case 0x5695:                                            return {A::INTEL_XE_HPG, 8};    // DG2-G11, no public SKU
+        case 0x5697:                                            return {A::INTEL_XE_HPG, 12};   // A530M
+        case 0x5692: case 0x5696: case 0x56B2: case 0x56B3:     return {A::INTEL_XE_HPG, 16};   // A550M / A570M / Pro A60M / Pro A60
+        case 0x56A3: case 0x56A4:                               return {A::INTEL_XE_HPG, 16};   // DG2-G12, no public SKU
+        case 0x5691: case 0x56A2: case 0x56BF:                  return {A::INTEL_XE_HPG, 24};   // A730M / A580 / A580E
+        case 0x56A1: case 0x56BE:                               return {A::INTEL_XE_HPG, 28};   // A750 / A750E
+        case 0x5690: case 0x56A0: case 0x56C0: case 0x56C2:     return {A::INTEL_XE_HPG, 32};   // A770M / A770 / Flex 170 / Flex 170V
         // Meteor Lake, Arrow Lake (Xe-LPG)
-        case 0x7D40: case 0x7D45: case 0x7D41: case 0x7D67:     return 4;    // MTL 64/48 EUs, ARL-U 64, ARL-S 64/48/32
-        case 0x7D55: case 0x7DD5: case 0x7D51:                  return 8;    // MTL 128/112 EUs, ARL-H 128/112
+        case 0x7D40: case 0x7D45: case 0x7D60:
+        case 0x7D41: case 0x7D67: case 0xB640:                  return {A::INTEL_XE_LPG, 4};    // MTL-U 64/48 EUs (0x7D60 no public SKU), ARL-U 64, ARL-S 64/48/32 (0xB640 no public SKU)
+        case 0x7D55: case 0x7DD5: case 0x7D51: case 0x7DD1:     return {A::INTEL_XE_LPG, 8};    // MTL-H 128/112 EUs, ARL-H 128/112 (0x7DD1 no public SKU)
         // Lunar Lake (Xe2)
-        case 0x64A0: case 0x6420:                               return 8;    // 64/56 EUs
+        case 0x64A0: case 0x6420: case 0x64B0:                  return {A::INTEL_XE2, 8};       // 64/56 EUs (0x64B0 no public SKU)
         // Battlemage (Xe2)
-        case 0xE212:                                            return 16;   // Pro B50
-        case 0xE20C:                                            return 18;   // B570
-        case 0xE20B: case 0xE211: case 0xE222:                  return 20;   // B580 / Pro B60 / Pro B65
-        case 0xE223:                                            return 32;   // Pro B70
-        // Panther Lake (Xe3)
-        case 0xB090: case 0xB0A0:                               return 4;    // Intel Graphics, 4/3/2 Xe-cores
-        case 0xB081: case 0xB083: case 0xB085: case 0xB087:     return 11;   // Arc B370, 11/10 Xe-cores
-        case 0xB080: case 0xB082: case 0xB084: case 0xB086:     return 12;   // Arc B390
-        default:                                                return 0;
+        case 0xE212:                                            return {A::INTEL_XE2, 16};      // Pro B50
+        case 0xE20C:                                            return {A::INTEL_XE2, 18};      // B570
+        case 0xE20B: case 0xE211: case 0xE222:                  return {A::INTEL_XE2, 20};      // B580 / Pro B60 / Pro B65
+        case 0xE202: case 0xE209: case 0xE20D: case 0xE210:
+        case 0xE215: case 0xE216:                               return {A::INTEL_XE2, 20};      // BMG-G21, no public SKU
+        case 0xE223:                                            return {A::INTEL_XE2, 32};      // Pro B70
+        case 0xE220: case 0xE221:                               return {A::INTEL_XE2, 32};      // BMG-G31, no public SKU
+        // Panther Lake, Wildcat Lake, Nova Lake (Xe3)
+        case 0xFD80: case 0xFD81:                               return {A::INTEL_XE3, 2};       // Wildcat Lake
+        case 0xB090: case 0xB0A0: case 0xB0B0:                  return {A::INTEL_XE3, 4};       // Intel Graphics, 4/3/2 Xe-cores (0xB0B0 no public SKU)
+        case 0xB081: case 0xB083: case 0xB085: case 0xB087:     return {A::INTEL_XE3, 11};      // Arc B370, 11/10 Xe-cores
+        case 0xB080: case 0xB082: case 0xB084: case 0xB086:
+        case 0xB08F:                                            return {A::INTEL_XE3, 12};      // Arc B390 (0xB08F no public SKU)
+        case 0xD740: case 0xD741: case 0xD742: case 0xD743:
+        case 0xD745: case 0xD750: case 0xD751: case 0xD752:
+        case 0xD753: case 0xD754: case 0xD755: case 0xD756:
+        case 0xD757: case 0xD75F:                               return {A::INTEL_XE3, 0};       // Nova Lake, counts not public
+        default:                                                return {A::INTEL_XE, 0};
     }
 }
 
@@ -988,12 +1029,12 @@ struct ArchFingerprint
     uint32_t warpsPerSM;          // NV SM builtins
     uint32_t wavefrontsPerSimd;   // AMD shader core
     bool mixedDp4a;               // packed 4x8 mixed-signedness dot accelerated
-    bool signedDp4a;              // packed 4x8 signed dot accelerated
 };
 
 // Architecture from Vulkan feature fingerprints, not device-id tables — new
 // devices of a known generation classify without a list update. NONE when the
-// fingerprint is inconclusive; callers must handle it.
+// fingerprint is inconclusive; callers must handle it. Intel goes by device id
+// instead (intelPart): its generations share fingerprints.
 static Architecture detectArchitecture(const ArchFingerprint& fp)
 {
     if (fp.vendorID == VENDOR_ID::AMD && fp.wavefrontsPerSimd != 0)
@@ -1011,11 +1052,6 @@ static Architecture detectArchitecture(const ArchFingerprint& fp)
     {
         return fp.warpsPerSM == 32u ? Architecture::NVIDIA_TURING
                                     : Architecture::NVIDIA_POST_TURING;
-    }
-    else if (fp.vendorID == VENDOR_ID::INTEL)
-    {
-        if (fp.minSubgroupSize == 16u)                 return Architecture::INTEL_XE2;
-        if (fp.minSubgroupSize == 8u && fp.signedDp4a) return Architecture::INTEL_XE1;
     }
     return Architecture::NONE;
 }
@@ -1743,7 +1779,6 @@ Device Runtime::createDevice(const DeviceSettings& settings)
             .warpsPerSM        = hasSmBuiltins ? smBuiltinsProps.shaderWarpsPerSM : 0,
             .wavefrontsPerSimd = hasAmdShaderCoreProps ? amdShaderCoreProps.wavefrontsPerSimd : 0,
             .mixedDp4a         = bool(integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated),
-            .signedDp4a        = bool(integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated),
         });
 
         // Arithmetic ops are only usable where the compute stage is one of the
@@ -1767,7 +1802,13 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         else if (hasAmdCoreProps)
             pImpl->computeBlockCount = amdCoreProps.activeComputeUnitCount;
         else if (pImpl->vendorID == VENDOR_ID::INTEL)
-            pImpl->computeBlockCount = intelComputeBlockCount(pImpl->deviceID);
+        {
+            // A count the table does not know reads 8, Meteor Lake H's: the
+            // Xe-core parts it misses are mostly that line's ids.
+            const IntelPart part = intelPart(pImpl->deviceID);
+            pImpl->architecture = part.architecture;
+            pImpl->computeBlockCount = part.xeCores ? part.xeCores : 8u;
+        }
     }
 
     // Cache every cooperative-matrix shape the device reports.

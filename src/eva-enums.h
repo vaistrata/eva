@@ -608,10 +608,12 @@ enum class Architecture : uint32_t {
     AMD_RDNA2           = (VENDOR_ID::AMD << 16) | 0x0002,
     AMD_POST_RDNA2      = (VENDOR_ID::AMD << 16) | 0x0003,
 
-    //INTEL
-    INTEL_XE1           = (VENDOR_ID::INTEL << 16) | 0x0001,
-    INTEL_XE2           = (VENDOR_ID::INTEL << 16) | 0x0002,
-    INTEL_XE3           = (VENDOR_ID::INTEL << 16) | 0x0003,
+    //INTEL (by device id)
+    INTEL_XE            = (VENDOR_ID::INTEL << 16) | 0x0001,   // Xe-LP and older, and any id the table misses
+    INTEL_XE_LPG        = (VENDOR_ID::INTEL << 16) | 0x0002,   // Meteor Lake, Arrow Lake
+    INTEL_XE_HPG        = (VENDOR_ID::INTEL << 16) | 0x0003,   // Alchemist, Arctic Sound-M
+    INTEL_XE2           = (VENDOR_ID::INTEL << 16) | 0x0004,   // Lunar Lake, Battlemage
+    INTEL_XE3           = (VENDOR_ID::INTEL << 16) | 0x0005,   // Panther Lake, Wildcat Lake, Nova Lake
 };
 
 enum class PRESENT_MODE : uint32_t {
