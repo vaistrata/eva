@@ -351,6 +351,10 @@ public:
     // mixed-signedness dot product (dotPacked4x8EXT(int, uint)) natively
     // (integerDotProduct4x8BitPackedMixedSignednessAccelerated).
     bool supportsDot4x8PackedMixedAccelerated() const;
+    // True if the shaderIntegerDotProduct feature was enabled and the device runs
+    // the packed 4x8 signed dot product (dotPacked4x8EXT(int, int)) natively
+    // (VkPhysicalDeviceShaderIntegerDotProductProperties.integerDotProduct4x8BitPackedSignedAccelerated).
+    bool supportsDot4x8PackedSignedAccelerated() const;
     // Device identity (VkPhysicalDeviceProperties / VkPhysicalDeviceDriverProperties).
     uint32_t vendorID() const;
     uint32_t deviceID() const;
