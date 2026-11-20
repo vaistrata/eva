@@ -346,6 +346,7 @@ struct Device::Impl {
     uint32_t maxSubgroupSize = 0;   // VkPhysicalDeviceSubgroupSizeControlProperties.maxSubgroupSize
     bool subgroupArithmetic = false;   // ARITHMETIC op class usable from compute shaders
     bool dot4x8PackedMixedAccelerated = false;   // VkPhysicalDeviceShaderIntegerDotProductProperties
+    bool dot4x8PackedSignedAccelerated = false;  // VkPhysicalDeviceShaderIntegerDotProductProperties.integerDotProduct4x8BitPackedSignedAccelerated
 
     uint32_t vendorID = 0;                        // VkPhysicalDeviceProperties.vendorID
     uint32_t deviceID = 0;                        // VkPhysicalDeviceProperties.deviceID
@@ -1790,6 +1791,8 @@ Device Runtime::createDevice(const DeviceSettings& settings)
         pImpl->driverID = (DRIVER_ID) driverProps.driverID;
         pImpl->dot4x8PackedMixedAccelerated =
             integerDotProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated == VK_TRUE;
+        pImpl->dot4x8PackedSignedAccelerated =
+            integerDotProps.integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE;
 
         pImpl->architecture = detectArchitecture({
             .vendorID          = pImpl->vendorID,
@@ -2104,6 +2107,11 @@ bool Device::supportsIntegerDotProduct() const
 bool Device::supportsDot4x8PackedMixedAccelerated() const
 {
     return impl().features.shaderIntegerDotProduct && impl().dot4x8PackedMixedAccelerated;
+}
+
+bool Device::supportsDot4x8PackedSignedAccelerated() const
+{
+    return impl().features.shaderIntegerDotProduct && impl().dot4x8PackedSignedAccelerated;
 }
 
 uint32_t Device::vendorID() const
