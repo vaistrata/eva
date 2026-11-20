@@ -482,6 +482,9 @@ public:
 
     CommandBuffer end();
 
+    CommandBuffer beginDebugLabel(const char* name);
+    CommandBuffer endDebugLabel();
+
     CommandBuffer bindPipeline(
         Pipeline pipeline
     );

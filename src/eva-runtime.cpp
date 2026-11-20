@@ -137,6 +137,12 @@ static VkInstance createVkInstance()
     first = false;
 
     std::vector<const char*> extensions = getRequiredInstanceExtensions();
+    auto instanceExtensions = arrayFrom(vkEnumerateInstanceExtensionProperties, nullptr);
+    if (std::any_of(instanceExtensions.begin(), instanceExtensions.end(), [](const auto& props) {
+        return strcmp(props.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0;
+    }))
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
     std::vector<const char*> requiredLayers;
 #ifndef NDEBUG
     requiredLayers.push_back("VK_LAYER_KHRONOS_validation");
@@ -253,11 +259,17 @@ static std::pair<VkMemoryAllocateInfo, VkMemoryPropertyFlags> getMemoryAllocInfo
 /////////////////////////////////////////////////////////////////////////////////////////
 struct Runtime::Impl {
     const VkInstance instance;
+    const PFN_vkCmdBeginDebugUtilsLabelEXT beginDebugLabel;
+    const PFN_vkCmdEndDebugUtilsLabelEXT endDebugLabel;
     std::vector<Device> devices;
 #ifdef EVA_ENABLE_WINDOW
     std::vector<Window> windows;
 #endif
-    Impl(VkInstance instance) : instance(instance) {}
+    Impl(VkInstance instance)
+    : instance(instance)
+    , beginDebugLabel((PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdBeginDebugUtilsLabelEXT"))
+    , endDebugLabel((PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT"))
+    {}
 };
 
 
@@ -2491,6 +2503,28 @@ CommandBuffer CommandBuffer::begin(COMMAND_BUFFER_USAGE flags)
 CommandBuffer CommandBuffer::end()
 {
     ASSERT_SUCCESS(vkEndCommandBuffer(impl().vkCmdBuffer));
+    return *this;
+}
+
+CommandBuffer CommandBuffer::beginDebugLabel(const char* name)
+{
+    const auto beginLabel = impl().device.impl().parent.impl().beginDebugLabel;
+    if (beginLabel)
+    {
+        VkDebugUtilsLabelEXT label{
+            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+            .pLabelName = name,
+        };
+        beginLabel(impl().vkCmdBuffer, &label);
+    }
+    return *this;
+}
+
+CommandBuffer CommandBuffer::endDebugLabel()
+{
+    const auto endLabel = impl().device.impl().parent.impl().endDebugLabel;
+    if (endLabel)
+        endLabel(impl().vkCmdBuffer);
     return *this;
 }
 
